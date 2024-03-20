@@ -156,6 +156,7 @@ func parsePackage(writer io.Writer, pkg *build.Package, userPath string) *Packag
 	}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, pkg.Dir, include, parser.ParseComments)
+	// TODO  GOTO: run parser2.Parse dir as well
 	if err != nil {
 		log.Fatal(err)
 	}
