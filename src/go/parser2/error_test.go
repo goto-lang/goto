@@ -20,7 +20,7 @@
 //		_ = x /* ERROR "not declared" */ + 1
 //	}
 
-package parser
+package parser2
 
 import (
 	"flag"

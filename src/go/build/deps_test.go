@@ -294,7 +294,10 @@ var depsRules = `
 	go/internal/typeparams, go/build/constraint
 	< go/parser;
 
-	go/doc/comment, go/parser, text/tabwriter
+	go/internal/typeparams, go/build/constraint
+	< go/parser2;
+
+	go/doc/comment, go/parser, go/parser2, text/tabwriter
 	< go/printer
 	< go/format;
 
@@ -304,7 +307,7 @@ var depsRules = `
 	FMT, internal/goexperiment
 	< internal/buildcfg;
 
-	container/heap, go/constant, go/parser, internal/buildcfg, internal/goversion, internal/types/errors
+	container/heap, go/constant, go/parser, go/parser2, internal/buildcfg, internal/goversion, internal/types/errors
 	< go/types;
 
 	# The vast majority of standard library packages should not be resorting to regexp.
@@ -312,10 +315,10 @@ var depsRules = `
 	# that is low-enough level to be used by go/types.
 	regexp !< go/types;
 
-	go/doc/comment, go/parser, internal/lazyregexp, text/template
+	go/doc/comment, go/parser, go/parser2, internal/lazyregexp, text/template
 	< go/doc;
 
-	go/build/constraint, go/doc, go/parser, internal/buildcfg, internal/goroot, internal/goversion, internal/platform
+	go/build/constraint, go/doc, go/parser, go/parser2, internal/buildcfg, internal/goroot, internal/goversion, internal/platform
 	< go/build;
 
 	# databases
@@ -595,7 +598,7 @@ var depsRules = `
 	log/slog, testing
 	< testing/slogtest;
 
-	FMT, crypto/sha256, encoding/json, go/ast, go/parser, go/token,
+	FMT, crypto/sha256, encoding/json, go/ast, go/parser, go/parser2, go/token,
 	internal/godebug, math/rand, encoding/hex, crypto/sha256
 	< internal/fuzz;
 

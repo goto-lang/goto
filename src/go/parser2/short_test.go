@@ -4,7 +4,7 @@
 
 // This file contains test cases for short valid and invalid programs.
 
-package parser
+package parser2
 
 import "testing"
 
