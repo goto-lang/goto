@@ -68,7 +68,6 @@ func main() {
 			return nil
 		}
 		pkgs, err := parser.ParseDir(fset, path, isGoFile, parser.ParseComments)
-		// TODO  GOTO: run parser2.Parse dir as well
 
 		if err != nil {
 			if *verbose {

@@ -430,6 +430,8 @@ type Package struct {
 
 	// Source files
 	GoFiles           []string // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+	// TODO  GOTO Should we use those? 
+	// GotoFiles         []string // .goto source files
 	CgoFiles          []string // .go source files that import "C"
 	IgnoredGoFiles    []string // .go source files ignored for this build (including ignored _test.go files)
 	InvalidGoFiles    []string // .go source files with detected problems (parse error, wrong package name, and so on)
@@ -875,14 +877,14 @@ Found:
 		ext := nameExt(name)
 
 		info, err := ctxt.matchFile(p.Dir, name, allTags, &p.BinaryOnly, fset)
-		if err != nil && strings.HasSuffix(name, ".go") {
+		if err != nil && (strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".goto")) {
 			badGoFile(name, err)
 			continue
 		}
 		if info == nil {
 			if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
 				// not due to build constraints - don't report
-			} else if ext == ".go" {
+			} else if ext == ".go" || ext == ".goto" {
 				p.IgnoredGoFiles = append(p.IgnoredGoFiles, name)
 			} else if fileListForExt(p, ext) != nil {
 				p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, name)
@@ -892,7 +894,7 @@ Found:
 
 		// Going to save the file. For non-Go files, can stop here.
 		switch ext {
-		case ".go":
+		case ".go", ".goto":
 			// keep going
 		case ".S", ".sx":
 			// special case for cgo, handled at end
@@ -1275,7 +1277,7 @@ func equal(x, y []string) bool {
 func hasGoFiles(ctxt *Context, dir string) bool {
 	ents, _ := ctxt.readDir(dir)
 	for _, ent := range ents {
-		if !ent.IsDir() && strings.HasSuffix(ent.Name(), ".go") {
+		if !ent.IsDir() && (strings.HasSuffix(ent.Name(), ".go") || strings.HasSuffix(ent.Name(), ".goto")) {
 			return true
 		}
 	}
@@ -1448,7 +1450,7 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 	}
 	ext := name[i:]
 
-	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
+	if ext != ".go" && ext != ".goto" && fileListForExt(&dummyPkg, ext) == nil {
 		// skip
 		return nil, nil
 	}
@@ -1468,7 +1470,7 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 		return nil, err
 	}
 
-	if strings.HasSuffix(name, ".go") {
+	if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".goto") {
 		err = readGoInfo(f, info)
 		if strings.HasSuffix(name, "_test.go") {
 			binaryOnly = nil // ignore //go:binary-only-package comments in _test.go files

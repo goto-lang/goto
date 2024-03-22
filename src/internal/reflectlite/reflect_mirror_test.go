@@ -75,7 +75,6 @@ func loadTypes(path, pkgName string, v visitor) {
 		return strings.HasSuffix(fi.Name(), ".go")
 	}
 	pkgs, err := parser.ParseDir(fset, path, filter, 0)
-	// TODO  GOTO: run parser2.Parse dir as well
 
 	if err != nil {
 		panic(err)

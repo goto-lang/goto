@@ -23,7 +23,7 @@ func IsStandardPackage(goroot, compiler, path string) bool {
 			return false
 		}
 		for _, dirent := range dirents {
-			if strings.HasSuffix(dirent.Name(), ".go") {
+			if strings.HasSuffix(dirent.Name(), ".go") || strings.HasSuffix(dirent.Name(), ".goto") {
 				return true
 			}
 		}

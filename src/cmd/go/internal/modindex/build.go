@@ -426,7 +426,7 @@ func getFileInfo(dir, name string, fset *token.FileSet) (*fileInfo, error) {
 	}
 	ext := name[i:]
 
-	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
+	if ext != ".go" && ext != ".goto" && fileListForExt(&dummyPkg, ext) == nil {
 		// skip
 		return nil, errNonSource
 	}
@@ -445,7 +445,7 @@ func getFileInfo(dir, name string, fset *token.FileSet) (*fileInfo, error) {
 	// TODO(matloob) should we decide whether to ignore binary only here or earlier
 	// when we create the index file?
 	var ignoreBinaryOnly bool
-	if strings.HasSuffix(name, ".go") {
+	if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".goto") || strings.HasSuffix(name, "") {
 		err = readGoInfo(f, info)
 		if strings.HasSuffix(name, "_test.go") {
 			ignoreBinaryOnly = true // ignore //go:binary-only-package comments in _test.go files

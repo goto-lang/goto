@@ -292,10 +292,8 @@ var depsRules = `
 	< go/build/constraint, go/doc/comment;
 
 	go/internal/typeparams, go/build/constraint
+	< go/parser2
 	< go/parser;
-
-	go/internal/typeparams, go/build/constraint
-	< go/parser2;
 
 	go/doc/comment, go/parser, go/parser2, text/tabwriter
 	< go/printer

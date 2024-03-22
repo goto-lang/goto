@@ -15,7 +15,6 @@ import (
 func TestComment(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, "testdata/pkgdoc", nil, parser.ParseComments)
-	// TODO  GOTO: run parser2.Parse dir as well
 	if err != nil {
 		t.Fatal(err)
 	}

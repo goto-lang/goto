@@ -131,7 +131,7 @@ func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast
 // AST with all the packages found.
 //
 // If filter != nil, only the files with [fs.FileInfo] entries passing through
-// the filter (and ending in ".go") are considered. The mode bits are passed
+// the filter (and ending in ".goto") are considered. The mode bits are passed
 // to [ParseFile] unchanged. Position information is recorded in fset, which
 // must not be nil.
 //

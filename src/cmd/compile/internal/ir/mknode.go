@@ -82,7 +82,6 @@ func main() {
 		return !strings.HasPrefix(file.Name(), "mknode")
 	}
 	pkgs, err := parser.ParseDir(fset, ".", filter, 0)
-	// TODO  GOTO: run parser2.Parse dir as well
 	if err != nil {
 		panic(err)
 	}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"go/ast"
 	"go/token"
+	"go/parser2"
 	"io"
 	"io/fs"
 	"os"
@@ -146,32 +147,65 @@ func ParseDir(fset *token.FileSet, path string, filter func(fs.FileInfo) bool, m
 
 	pkgs = make(map[string]*ast.Package)
 	for _, d := range list {
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") {
+		if d.IsDir() {
 			continue
 		}
-		if filter != nil {
-			info, err := d.Info()
-			if err != nil {
-				return nil, err
-			}
-			if !filter(info) {
-				continue
-			}
-		}
-		filename := filepath.Join(path, d.Name())
-		if src, err := ParseFile(fset, filename, nil, mode); err == nil {
-			name := src.Name.Name
-			pkg, found := pkgs[name]
-			if !found {
-				pkg = &ast.Package{
-					Name:  name,
-					Files: make(map[string]*ast.File),
+
+		switch {
+		case strings.HasSuffix(d.Name(), ".go"):
+			if filter != nil {
+				info, err := d.Info()
+				if err != nil {
+					return nil, err
 				}
-				pkgs[name] = pkg
+				if !filter(info) {
+					continue
+				}
 			}
-			pkg.Files[filename] = src
-		} else if first == nil {
-			first = err
+			filename := filepath.Join(path, d.Name())
+			if src, err := ParseFile(fset, filename, nil, mode); err == nil {
+				name := src.Name.Name
+				pkg, found := pkgs[name]
+				if !found {
+					pkg = &ast.Package{
+						Name:  name,
+						Files: make(map[string]*ast.File),
+					}
+					pkgs[name] = pkg
+				}
+				pkg.Files[filename] = src
+			} else if first == nil {
+				first = err
+			}
+
+		case strings.HasSuffix(d.Name(), ".goto"):
+			print("Found .goto files!")
+			if filter != nil {
+				info, err := d.Info()
+				if err != nil {
+					return nil, err
+				}
+				if !filter(info) {
+					continue
+				}
+			}
+			filename := filepath.Join(path, d.Name())
+			if src, err := parser2.ParseFile(fset, filename, nil, parser2.Mode(mode)); err == nil {
+				name := src.Name.Name
+				pkg, found := pkgs[name]
+				if !found {
+					pkg = &ast.Package{
+						Name:  name,
+						Files: make(map[string]*ast.File),
+					}
+					pkgs[name] = pkg
+				}
+				pkg.Files[filename] = src
+			} else if first == nil {
+				first = err
+			}
+
+		default: continue
 		}
 	}
 

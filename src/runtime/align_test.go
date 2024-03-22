@@ -66,7 +66,6 @@ func TestAtomicAlignment(t *testing.T) {
 	// appropriate atomic operations are in the list above.
 	fset := token.NewFileSet()
 	m, err := parser.ParseDir(fset, ".", nil, 0)
-	// TODO  GOTO: run parser2.Parse dir as well
 	if err != nil {
 		t.Fatalf("parsing runtime failed: %v", err)
 	}

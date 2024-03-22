@@ -1084,7 +1084,7 @@ func CreateModFile(ctx context.Context, modPath string) {
 		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 			continue
 		}
-		if strings.HasSuffix(name, ".go") || f.IsDir() {
+		if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".goto") || f.IsDir() {
 			empty = false
 			break
 		}
@@ -1590,7 +1590,7 @@ func findModulePath(dir string) (string, error) {
 	// first in top-level directory, then in subdirectories.
 	list, _ := os.ReadDir(dir)
 	for _, info := range list {
-		if info.Type().IsRegular() && strings.HasSuffix(info.Name(), ".go") {
+		if info.Type().IsRegular() && (strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), ".goto")) {
 			if com := findImportComment(filepath.Join(dir, info.Name())); com != "" {
 				return com, nil
 			}
@@ -1600,7 +1600,7 @@ func findModulePath(dir string) (string, error) {
 		if info1.IsDir() {
 			files, _ := os.ReadDir(filepath.Join(dir, info1.Name()))
 			for _, info2 := range files {
-				if info2.Type().IsRegular() && strings.HasSuffix(info2.Name(), ".go") {
+				if info2.Type().IsRegular() && (strings.HasSuffix(info2.Name(), ".go") || strings.HasSuffix(info2.Name(), ".goto")) {
 					if com := findImportComment(filepath.Join(dir, info1.Name(), info2.Name())); com != "" {
 						return path.Dir(com), nil
 					}

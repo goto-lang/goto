@@ -69,7 +69,7 @@ func walkDir(t *testing.T, path string, endTime time.Time) (int, bool) {
 			if abort {
 				return nimports, true
 			}
-		} else if strings.HasSuffix(f.Name(), ".go") {
+		} else if strings.HasSuffix(f.Name(), ".go") || strings.HasSuffix(f.Name(), ".go") {
 			hasGoFiles = true
 		}
 	}

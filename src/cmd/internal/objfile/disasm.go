@@ -134,7 +134,7 @@ func NewFileCache(maxLen int) *FileCache {
 // and removes the least recently used file if necessary.
 // If the file is in cache, it is moved to the front of the list.
 func (fc *FileCache) Line(filename string, line int) ([]byte, error) {
-	if filepath.Ext(filename) != ".go" {
+	if filepath.Ext(filename) != ".go" && filepath.Ext(filename) != ".goto" {
 		return nil, nil
 	}
 

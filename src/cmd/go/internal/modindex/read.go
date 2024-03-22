@@ -511,7 +511,7 @@ func (rp *IndexPackage) Import(bctxt build.Context, mode build.ImportMode) (p *b
 
 		// Going to save the file. For non-Go files, can stop here.
 		switch ext {
-		case ".go":
+		case ".go", ".goto":
 			// keep going
 		case ".S", ".sx":
 			// special case for cgo, handled at end
@@ -650,6 +650,7 @@ func (rp *IndexPackage) Import(bctxt build.Context, mode build.ImportMode) (p *b
 		return p, badGoError
 	}
 	if len(p.GoFiles)+len(p.CgoFiles)+len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
+		print("GOTO: No Go files in import")
 		return p, &build.NoGoError{Dir: p.Dir}
 	}
 	return p, pkgerr
@@ -688,7 +689,7 @@ func (rp *IndexPackage) IsDirWithGoFiles() (_ bool, err error) {
 		}
 	}()
 	for _, sf := range rp.sourceFiles {
-		if strings.HasSuffix(sf.name(), ".go") {
+		if strings.HasSuffix(sf.name(), ".go") || strings.HasSuffix(sf.name(), ".goto") {
 			return true, nil
 		}
 	}
@@ -713,7 +714,7 @@ func (rp *IndexPackage) ScanDir(tags map[string]bool) (sortedImports []string, s
 Files:
 	for _, sf := range rp.sourceFiles {
 		name := sf.name()
-		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".go") || !imports.MatchFile(name, tags) {
+		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") || (!strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, ".goto")) || !imports.MatchFile(name, tags) {
 			continue
 		}
 

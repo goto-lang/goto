@@ -457,7 +457,7 @@ func IsDirWithGoFiles(dir string) (bool, error) {
 		// has a .go suffix, but the actual destination file
 		// doesn't need to have a .go suffix. Is this okay with the
 		// compiler?
-		if !strings.HasSuffix(fi.Name(), ".go") {
+		if !strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), ".goto") {
 			continue
 		}
 		if fi.Mode().IsRegular() {
