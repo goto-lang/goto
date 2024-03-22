@@ -650,7 +650,7 @@ func (rp *IndexPackage) Import(bctxt build.Context, mode build.ImportMode) (p *b
 		return p, badGoError
 	}
 	if len(p.GoFiles)+len(p.CgoFiles)+len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
-		print("GOTO: No Go files in import")
+		// print("GOTO: No Go files in import")
 		return p, &build.NoGoError{Dir: p.Dir}
 	}
 	return p, pkgerr

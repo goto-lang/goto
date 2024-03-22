@@ -3161,7 +3161,7 @@ func GoFilesPackage(ctx context.Context, opts PackageOpts, gofiles []string) *Pa
 	modload.Init()
 
 	for _, f := range gofiles {
-		if !strings.HasSuffix(f, ".go") {
+		if !strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, ".goto") {
 			pkg := new(Package)
 			pkg.Internal.Local = true
 			pkg.Internal.CmdlineFiles = true
