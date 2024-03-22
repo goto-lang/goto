@@ -283,7 +283,7 @@ func (a *Action) trimpath() string {
 				path = filepath.Join(a.Package.Dir, path)
 			}
 			base := filepath.Base(path)
-			isGo := strings.HasSuffix(filename, ".go") || strings.HasSuffix(filename, ".s")
+			isGo := strings.HasSuffix(filename, ".go") || strings.HasSuffix(filename, ".s") || strings.HasSuffix(filename, ".goto")
 			isCgo := cgoFiles[filename] || !isGo
 			overlayPath, isOverlay := fsys.OverlayPath(path)
 			if isCgo && isOverlay {

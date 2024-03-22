@@ -96,7 +96,7 @@ func runRun(ctx context.Context, cmd *base.Command, args []string) {
 	}()
 
 	i := 0
-	for i < len(args) && strings.HasSuffix(args[i], ".go") {
+	for i < len(args) && (strings.HasSuffix(args[i], ".go") || strings.HasSuffix(args[i], ".goto")) {
 		i++
 	}
 	pkgOpts := load.PackageOpts{MainOnly: true}
@@ -164,6 +164,7 @@ func runRun(ctx context.Context, cmd *base.Command, args []string) {
 			}
 			base.Fatalf("go: no suitable source files%s", hint)
 		}
+		// TODO  GOTO: Handle .goto file extension here
 		p.Internal.ExeName = src[:len(src)-len(".go")]
 	} else {
 		p.Internal.ExeName = path.Base(p.ImportPath)
@@ -190,6 +191,7 @@ func shouldUseOutsideModuleMode(args []string) bool {
 	// versions.
 	return len(args) > 0 &&
 		!strings.HasSuffix(args[0], ".go") &&
+		!strings.HasSuffix(args[0], ".goto") &&
 		!strings.HasPrefix(args[0], "-") &&
 		strings.Contains(args[0], "@") &&
 		!build.IsLocalImport(args[0]) &&

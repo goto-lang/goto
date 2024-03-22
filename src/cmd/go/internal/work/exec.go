@@ -102,7 +102,7 @@ func (b *Builder) Do(ctx context.Context, root *Action) {
 	// Write action graph, without timing information, in case we fail and exit early.
 	writeActionGraph := func() {
 		if file := cfg.DebugActiongraph; file != "" {
-			if strings.HasSuffix(file, ".go") {
+			if strings.HasSuffix(file, ".go") || strings.HasSuffix(file, ".goto") {
 				// Do not overwrite Go source code in:
 				//	go build -debug-actiongraph x.go
 				base.Fatalf("go: refusing to write action graph to %v\n", file)
@@ -1101,7 +1101,7 @@ func (b *Builder) loadCachedCompiledGoFiles(a *Action) error {
 	for _, name := range strings.Split(string(list), "\n") {
 		if name == "" { // end of list
 			continue
-		} else if !strings.HasSuffix(name, ".go") {
+		} else if !strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, ".go") {
 			continue
 		}
 		if strings.HasPrefix(name, "./") {
