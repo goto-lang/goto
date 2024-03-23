@@ -87,6 +87,10 @@ func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast
 		panic("parser.ParseFile: no token.FileSet provided (fset == nil)")
 	}
 
+	if strings.HasSuffix(filename, ".goto") {
+		return parser2.ParseFile(fset, filename, src, parser2.Mode(mode))
+	}
+
 	// get source
 	text, err := readSource(filename, src)
 	if err != nil {
@@ -164,33 +168,6 @@ func ParseDir(fset *token.FileSet, path string, filter func(fs.FileInfo) bool, m
 			}
 			filename := filepath.Join(path, d.Name())
 			if src, err := ParseFile(fset, filename, nil, mode); err == nil {
-				name := src.Name.Name
-				pkg, found := pkgs[name]
-				if !found {
-					pkg = &ast.Package{
-						Name:  name,
-						Files: make(map[string]*ast.File),
-					}
-					pkgs[name] = pkg
-				}
-				pkg.Files[filename] = src
-			} else if first == nil {
-				first = err
-			}
-
-		case strings.HasSuffix(d.Name(), ".goto"):
-			print("Found .goto files!")
-			if filter != nil {
-				info, err := d.Info()
-				if err != nil {
-					return nil, err
-				}
-				if !filter(info) {
-					continue
-				}
-			}
-			filename := filepath.Join(path, d.Name())
-			if src, err := parser2.ParseFile(fset, filename, nil, parser2.Mode(mode)); err == nil {
 				name := src.Name.Name
 				pkg, found := pkgs[name]
 				if !found {

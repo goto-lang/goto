@@ -2843,8 +2843,6 @@ func (p *parser) parseFile() *ast.File {
 		defer un(trace(p, "File"))
 	}
 
-	// fmt.Printf("Running goto parser!\n\n")
-
 	// Don't bother parsing the rest if we had errors scanning the first token.
 	// Likely not a Go source file at all.
 	if p.errors.Len() != 0 {
