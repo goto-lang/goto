@@ -1081,10 +1081,24 @@ func (p *parser) parseResult() *ast.FieldList {
 		return results
 	}
 
+	isResultType := p.tok == token.NOT
+	if isResultType {
+		p.next()
+	}
+
 	typ := p.tryIdentOrType()
 	if typ != nil {
-		list := make([]*ast.Field, 1)
+		length := 1
+		if isResultType {
+			length = 2
+		}
+		list := make([]*ast.Field, length)
 		list[0] = &ast.Field{Type: typ}
+		if isResultType {
+			// TODO: Parse error type if it is explicitly specified
+			error := &ast.Ident{NamePos: p.pos, Name: "error"}
+			list[1] = &ast.Field{Type: error}
+		}
 		return &ast.FieldList{List: list}
 	}
 

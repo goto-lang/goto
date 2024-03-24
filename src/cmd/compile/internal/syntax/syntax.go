@@ -90,5 +90,6 @@ func ParseFile(filename string, errh ErrorHandler, pragh PragmaHandler, mode Mod
 		return nil, err
 	}
 	defer f.Close()
+
 	return Parse(NewFileBase(filename), f, errh, pragh, mode)
 }

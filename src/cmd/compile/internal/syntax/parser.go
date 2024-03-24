@@ -34,6 +34,14 @@ type parser struct {
 	indent []byte // tracing support
 }
 
+// enable goto-lang features / alternate goto-lang syntax
+func (p *parser) isGoto() bool {
+	if p.file == nil {
+		return false
+	}
+	return strings.HasSuffix(p.file.filename, ".goto")
+}
+
 func (p *parser) init(file *PosBase, r io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) {
 	p.top = true
 	p.file = file
@@ -464,6 +472,10 @@ func (p *parser) fileOrNil() *File {
 
 		if p.tok != _EOF && !p.got(_Semi) {
 			p.syntaxError("after top level declaration")
+			if p.isGoto() {
+				p.syntaxError("in Goto file")
+				p.syntaxError(fmt.Sprintf("in %v", p.base.filename))
+			}
 			p.advance(_Import, _Const, _Type, _Var, _Func)
 		}
 	}
@@ -1560,11 +1572,29 @@ func (p *parser) funcResult() []*Field {
 	}
 
 	pos := p.pos()
+	// TODO  GOTO: Check for NOT operator specifically
+	isResult := p.isGoto() && p.got(_Operator)
+
 	if typ := p.typeOrNil(); typ != nil {
 		f := new(Field)
 		f.pos = pos
 		f.Type = typ
-		return []*Field{f}
+
+		length := 1
+		if isResult {
+			length = 2
+		}
+
+		ret := make([]*Field, length)
+		ret[0] = f
+		if isResult {
+			err := new(Field)
+			err.pos = pos
+			err.Type = p.qualifiedName(NewName(p.pos(), "error"))
+			ret[1] = err
+		}
+
+		return ret
 	}
 
 	return nil
