@@ -1349,6 +1349,21 @@ func (p *parser) typeOrNil() Expr {
 		p.next()
 		return newIndirect(pos, p.type_())
 
+	case _Operator:
+		if !p.isGoto() {
+			return nil
+		}
+		switch p.op {
+			case Xor: 
+				p.next()
+				// TODO  GOTO: Save that type is non-nil
+				return newIndirect(pos, p.type_())
+			// case Not: 
+			// 	p.syntaxError("Result type is only allowed in return type position")
+			// 	return nil
+			default: return nil
+		}
+
 	case _Arrow:
 		// recvchantype
 		p.next()
@@ -1572,8 +1587,11 @@ func (p *parser) funcResult() []*Field {
 	}
 
 	pos := p.pos()
-	// TODO  GOTO: Check for NOT operator specifically
-	isResult := p.isGoto() && p.got(_Operator)
+	isResult := false
+	if p.isGoto() && p.tok == _Operator && p.op == Not {
+		isResult = true
+		p.next()
+	}
 
 	if typ := p.typeOrNil(); typ != nil {
 		f := new(Field)
