@@ -1330,6 +1330,15 @@ func newIndirect(pos Pos, typ Expr) Expr {
 	return o
 }
 
+func newNonNil(pos Pos, typ Expr) Expr {
+	o := new(Operation)
+	o.pos = pos
+	o.Op = Mul
+	o.X = typ
+	o.NonNil = true
+	return o
+}
+
 // typeOrNil is like type_ but it returns nil if there was no type
 // instead of reporting an error.
 //
@@ -1357,7 +1366,7 @@ func (p *parser) typeOrNil() Expr {
 			case Xor: 
 				p.next()
 				// TODO  GOTO: Save that type is non-nil
-				return newIndirect(pos, p.type_())
+			return newNonNil(pos, p.type_())
 			// case Not: 
 			// 	p.syntaxError("Result type is only allowed in return type position")
 			// 	return nil

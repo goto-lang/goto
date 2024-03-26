@@ -230,9 +230,10 @@ type (
 	}
 
 	Operation struct {
-		Op   Operator
-		X, Y Expr // Y == nil means unary expression
-		expr
+		Op	Operator
+		X, Y	Expr	// Y == nil means unary expression
+		NonNil	bool	// Only valid for Goto's non-nil pointer
+		expr	
 	}
 
 	// Fun(ArgList[0], ArgList[1], ...)
