@@ -7,7 +7,7 @@ package runtime
 import (
 	"internal/abi"
 	"internal/goarch"
-	"runtime/internal/atomic"
+	"internal/runtime/atomic"
 	"unsafe"
 )
 
@@ -213,6 +213,8 @@ type sigset struct{}
 func asmstdcall(fn unsafe.Pointer)
 
 var asmstdcallAddr unsafe.Pointer
+
+type winlibcall libcall
 
 func windowsFindfunc(lib uintptr, name []byte) stdFunction {
 	if name[len(name)-1] != 0 {
