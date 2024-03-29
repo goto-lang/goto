@@ -34,6 +34,9 @@ type parser struct {
 	indent []byte // tracing support
 }
 
+// ----------------------------------------------------------------------------
+// Goto-Lang additional functions
+
 // enable goto-lang features / alternate goto-lang syntax
 func (p *parser) isGoto() bool {
 	if p.file == nil {
@@ -41,6 +44,27 @@ func (p *parser) isGoto() bool {
 	}
 	return strings.HasSuffix(p.file.filename, ".goto")
 }
+
+// append imports that Goto uses as part of its standard library, e.g. fmt - if they are not already imported
+func (p *parser) appendGotoImports(list []Decl, f func(*Group) Decl) []Decl {
+	fmtDecl := new(ImportDecl)
+	fmtDecl.pos = p.pos()
+	// TODO  GOTO: Those are not strings but Name and BasicLit
+	path := new(BasicLit)
+	path.Value = "fmt"
+	path.Kind = StringLit
+	fmtDecl.Path = path
+
+	name := new(Name)
+	name.Value = "__fmt"
+	fmtDecl.LocalPkgName = name
+	// TODO  GOTO: Add something like var _ = ___fmt.Printf to silence unused import error
+	// TODO  GOTO: Alternatively, save if we used string interpolation and only add to the imports when that happened
+	list = append(list, fmtDecl)
+	return list
+}
+
+// ----------------------------------------------------------------------------
 
 func (p *parser) init(file *PosBase, r io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) {
 	p.top = true
@@ -426,6 +450,10 @@ func (p *parser) fileOrNil() *File {
 	// Accept import declarations anywhere for error tolerance, but complain.
 	// { ( ImportDecl | TopLevelDecl ) ";" }
 	prev := _Import
+
+	// For Goto files, always import fmt
+
+
 	for p.tok != _EOF {
 		if p.tok == _Import && prev != _Import {
 			p.syntaxError("imports must appear before other declarations")
