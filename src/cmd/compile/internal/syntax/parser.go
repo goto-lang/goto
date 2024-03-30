@@ -46,12 +46,12 @@ func (p *parser) isGoto() bool {
 }
 
 // append imports that Goto uses as part of its standard library, e.g. fmt - if they are not already imported
-func (p *parser) appendGotoImports(list []Decl, f func(*Group) Decl) []Decl {
+func (p *parser) appendGotoImports(list []Decl) []Decl {
 	fmtDecl := new(ImportDecl)
 	fmtDecl.pos = p.pos()
 	// TODO  GOTO: Those are not strings but Name and BasicLit
 	path := new(BasicLit)
-	path.Value = "fmt"
+	path.Value = "\"fmt\""
 	path.Kind = StringLit
 	fmtDecl.Path = path
 
@@ -455,6 +455,10 @@ func (p *parser) fileOrNil() *File {
 
 
 	for p.tok != _EOF {
+		if p.isGoto() && p.tok != _Import && prev == _Import {
+			f.DeclList = p.appendGotoImports(f.DeclList)
+		}
+
 		if p.tok == _Import && prev != _Import {
 			p.syntaxError("imports must appear before other declarations")
 		}
