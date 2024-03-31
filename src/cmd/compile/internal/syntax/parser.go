@@ -79,6 +79,7 @@ func (p *parser) parseFormatString() Expr {
 	builder := strings.Builder{}
 	expr := strings.Builder{}
 	formatVerb := ""
+	parseVerb := false
 
 	for _, r := range strings.Trim(val, "\"") {
 		// 'format group' parsing mode
@@ -107,12 +108,19 @@ func (p *parser) parseFormatString() Expr {
 				}
 				// TODO  GOTO: Error if openParens < 0
 
+			// initiate 'format verb' parsing mode
 			case ':':
-				// TODO  GOTO: Parse formatVerb if : is encountered
-				// continue
+				// TODO  GOTO: Syntax error if already in parse verb mode
+				parseVerb = true
+
+				continue
 			}
 
-			expr.WriteRune(r)
+			if parseVerb {
+				formatVerb = fmt.Sprintf("%v%v", formatVerb, r)
+			} else {
+				expr.WriteRune(r)
+			}
 
 			continue
 		}
@@ -123,6 +131,7 @@ func (p *parser) parseFormatString() Expr {
 			openParens = 1
 			formatVerb = ""
 			escape = false
+			parseVerb = false
 			expr.Reset()
 
 			continue
