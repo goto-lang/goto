@@ -825,7 +825,7 @@ func (s *scanner) escape(quote rune) bool {
 	var base, max uint32
 
 	switch s.ch {
-	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\':
+	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', '(':
 		s.nextch()
 		return true
 	case '0', '1', '2', '3', '4', '5', '6', '7':

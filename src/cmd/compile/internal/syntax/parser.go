@@ -67,12 +67,84 @@ func (p *parser) appendGotoImports(list []Decl) []Decl {
 // parses a goto format string and returns the corresponding fmt.Sprintf function call
 func (p *parser) parseFormatString() Expr {
 	lit := p.oliteral()
+	val := lit.Value
 
-	if lit == nil || lit.Kind != StringLit || !strings.Contains(lit.Value, "\\(") { 
+	if lit == nil || lit.Kind != StringLit || strings.HasPrefix(val, "`") || !strings.Contains(val, "\\(") {
 		return lit
 	}
-	
-	// TODO  GOTO: Implement parsing
+
+	exprs := []string{}
+	openParens := 0
+	escape := false
+	builder := strings.Builder{}
+	expr := strings.Builder{}
+	formatVerb := ""
+
+	for _, r := range strings.Trim(val, "\"") {
+		// 'format group' parsing mode
+		if openParens > 0 {
+			switch r {
+			case '(':
+				openParens++
+
+			// encountered closing paren, write % with formatVerb if this closes the format group
+			case ')':
+				openParens--
+
+				if openParens == 0 {
+					builder.WriteRune('%')
+
+					if formatVerb != "" {
+						// TODO  GOTO: Validate that formatVerb is a valid formatting verb
+						builder.WriteString(formatVerb)
+					} else {
+						builder.WriteRune('v')
+					}
+
+					exprs = append(exprs, expr.String())
+
+					continue
+				}
+				// TODO  GOTO: Error if openParens < 0
+
+			case ':':
+				// TODO  GOTO: Parse formatVerb if : is encountered
+				// continue
+			}
+
+			expr.WriteRune(r)
+
+			continue
+		}
+
+		// initiate 'format group' parsing mode
+		if r == '(' && escape {
+			// TODO  GOTO: Syntax error if open parens was not zero here
+			openParens = 1
+			formatVerb = ""
+			escape = false
+			expr.Reset()
+
+			continue
+		}
+
+		// don't write \ yet as it could initiate a \( format group that we want to omit from the resulting string
+		if r == '\\' && !escape {
+			escape = true
+
+			continue
+		}
+
+		// for an unconsumed escape sequence, write '\' to the resulting string
+		if escape {
+			builder.WriteRune('\\')
+			escape = false
+		}
+
+		builder.WriteRune(r)
+	}
+
+	// TODO  GOTO: From builder and exprs, construct call to __fmt.Sprintf here
 
 	return lit
 }
@@ -465,7 +537,6 @@ func (p *parser) fileOrNil() *File {
 	prev := _Import
 
 	// For Goto files, always import fmt
-
 
 	for p.tok != _EOF {
 		if p.isGoto() && p.tok != _Import && prev == _Import {
@@ -1412,14 +1483,15 @@ func (p *parser) typeOrNil() Expr {
 			return nil
 		}
 		switch p.op {
-			case Xor: 
-				p.next()
-				// TODO  GOTO: Save that type is non-nil
+		case Xor:
+			p.next()
+			// TODO  GOTO: Save that type is non-nil
 			return newNonNil(pos, p.type_())
-			// case Not: 
-			// 	p.syntaxError("Result type is only allowed in return type position")
-			// 	return nil
-			default: return nil
+		// case Not:
+		// 	p.syntaxError("Result type is only allowed in return type position")
+		// 	return nil
+		default:
+			return nil
 		}
 
 	case _Arrow:
