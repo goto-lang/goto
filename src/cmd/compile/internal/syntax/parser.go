@@ -64,6 +64,19 @@ func (p *parser) appendGotoImports(list []Decl) []Decl {
 	return list
 }
 
+// parses a goto format string and returns the corresponding fmt.Sprintf function call
+func (p *parser) parseFormatString() Expr {
+	lit := p.oliteral()
+
+	if lit == nil || lit.Kind != StringLit || !strings.Contains(lit.Value, "\\(") { 
+		return lit
+	}
+	
+	// TODO  GOTO: Implement parsing
+
+	return lit
+}
+
 // ----------------------------------------------------------------------------
 
 func (p *parser) init(file *PosBase, r io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) {
@@ -1037,6 +1050,10 @@ func (p *parser) operand(keep_parens bool) Expr {
 		return p.name()
 
 	case _Literal:
+		if p.isGoto() {
+			return p.parseFormatString()
+		}
+
 		return p.oliteral()
 
 	case _Lparen:
