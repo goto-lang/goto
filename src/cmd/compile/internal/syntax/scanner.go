@@ -671,6 +671,8 @@ func (s *scanner) rune() {
 	s.setLit(RuneLit, ok)
 }
 
+// TODO  GOTO: probably create a fmtString method here that is invoked instead of stdString that already handles format groups
+
 func (s *scanner) stdString() {
 	ok := true
 	s.nextch()

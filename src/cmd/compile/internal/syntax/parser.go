@@ -10,6 +10,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const debug = false
@@ -47,21 +49,51 @@ func (p *parser) isGoto() bool {
 
 // append imports that Goto uses as part of its standard library, e.g. fmt - if they are not already imported
 func (p *parser) appendGotoImports(list []Decl) []Decl {
-	fmtDecl := new(ImportDecl)
-	fmtDecl.pos = p.pos()
-	// TODO  GOTO: Those are not strings but Name and BasicLit
 	path := new(BasicLit)
 	path.Value = "\"fmt\""
 	path.Kind = StringLit
-	fmtDecl.Path = path
 
-	name := new(Name)
-	name.Value = "__fmt"
-	fmtDecl.LocalPkgName = name
+	fmtDecl := new(ImportDecl)
+	fmtDecl.pos = p.pos()
+	fmtDecl.Path = path
+	fmtDecl.LocalPkgName = newName("__fmt")
 	// TODO  GOTO: Add something like var _ = ___fmt.Printf to silence unused import error
 	// TODO  GOTO: Alternatively, save if we used string interpolation and only add to the imports when that happened
 	list = append(list, fmtDecl)
 	return list
+}
+
+func newName(val string) *Name {
+	name := new(Name)
+	name.Value = val
+
+	return name
+}
+
+func (p *parser) parseIdent(str string) (name Name) {
+	// TODO  GOTO: Handle that string could be a keyword
+	name = Name{}
+
+	for i, ch := range str {
+		switch {
+		case unicode.IsLetter(ch) || ch == '_':
+			continue
+		case unicode.IsDigit(ch):
+			if i == 0 {
+				p.errorf("identifier cannot begin with digit %#U", ch)
+				return
+			}
+		case ch >= utf8.RuneSelf:
+			p.errorf("invalid character %#U in identifier", ch)
+			return
+		default:
+			p.errorf("invalid identifier \"%v\" in format string", str)
+			return
+		}
+	}
+
+	name.Value = str
+	return
 }
 
 // parses a goto format string and returns the corresponding fmt.Sprintf function call
@@ -73,14 +105,15 @@ func (p *parser) parseFormatString() Expr {
 		return lit
 	}
 
-	exprs := []string{}
+	var exprs []string
 	openParens := 0
 	escape := false
 	builder := strings.Builder{}
-	expr := strings.Builder{}
+	item := strings.Builder{}
 	formatVerb := ""
 	parseVerb := false
 
+	builder.WriteRune('"')
 	for _, r := range strings.Trim(val, "\"") {
 		// 'format group' parsing mode
 		if openParens > 0 {
@@ -102,7 +135,7 @@ func (p *parser) parseFormatString() Expr {
 						builder.WriteRune('v')
 					}
 
-					exprs = append(exprs, expr.String())
+					exprs = append(exprs, item.String())
 
 					continue
 				}
@@ -117,9 +150,9 @@ func (p *parser) parseFormatString() Expr {
 			}
 
 			if parseVerb {
-				formatVerb = fmt.Sprintf("%v%v", formatVerb, r)
+				formatVerb = fmt.Sprintf("%v%c", formatVerb, r)
 			} else {
-				expr.WriteRune(r)
+				item.WriteRune(r)
 			}
 
 			continue
@@ -132,7 +165,7 @@ func (p *parser) parseFormatString() Expr {
 			formatVerb = ""
 			escape = false
 			parseVerb = false
-			expr.Reset()
+			item.Reset()
 
 			continue
 		}
@@ -152,12 +185,35 @@ func (p *parser) parseFormatString() Expr {
 
 		builder.WriteRune(r)
 	}
+	builder.WriteRune('"')
 
-	// TODO  GOTO: From builder and exprs, construct call to __fmt.Sprintf here
+	fmtString := &BasicLit{}
+	fmtString.pos = p.pos()
+	fmtString.Kind = StringLit
+	fmtString.Value = builder.String()
 
-	return lit
+	// TODO  GOTO: Allow all kinds of expression instead of just identifiers.
+	// 	Create a new parser for each expression? Or move this to scanner and handle it earlier?
+	args := []Expr{fmtString}
+	for _, elem := range exprs {
+		ident := newName(elem) // p.parseIdent(strings.TrimSpace(elem))
+		args = append(args, ident)
+	}
+
+	fmtFunc := &SelectorExpr{}
+	fmtFunc.pos = p.pos()
+	fmtFunc.X = newName("__fmt")
+	fmtFunc.Sel = newName("Sprintf")
+
+	fmtCall := &CallExpr{}
+	fmtCall.pos = p.pos()
+	fmtCall.Fun = fmtFunc
+	fmtCall.ArgList = args
+
+	return fmtCall
 }
 
+// END Goto helper functions
 // ----------------------------------------------------------------------------
 
 func (p *parser) init(file *PosBase, r io.Reader, errh ErrorHandler, pragh PragmaHandler, mode Mode) {
