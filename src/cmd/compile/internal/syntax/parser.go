@@ -70,9 +70,14 @@ func newName(val string) *Name {
 	return name
 }
 
-func (p *parser) parseIdent(str string) (name Name) {
+func (p *parser) parseIdent(str string) (name *Name) {
 	// TODO  GOTO: Handle that string could be a keyword
-	name = Name{}
+	name = new(Name)
+	str = strings.TrimSpace(str)
+	if len(str) == 0 {
+		p.errorf("argument in format string cannot consist only of whitespace")
+		return
+	}
 
 	for i, ch := range str {
 		switch {
@@ -196,7 +201,7 @@ func (p *parser) parseFormatString() Expr {
 	// 	Create a new parser for each expression? Or move this to scanner and handle it earlier?
 	args := []Expr{fmtString}
 	for _, elem := range exprs {
-		ident := newName(elem) // p.parseIdent(strings.TrimSpace(elem))
+		ident := p.parseIdent(elem)
 		args = append(args, ident)
 	}
 
