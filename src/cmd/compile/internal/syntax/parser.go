@@ -34,6 +34,12 @@ type parser struct {
 	fnest  int    // function nesting level (for error handling)
 	xnest  int    // expression nesting level (for complit ambiguity resolution)
 	indent []byte // tracing support
+
+	gotoFeatures
+}
+
+type gotoFeatures struct {
+	fmtString bool // does this file contain a format string?
 }
 
 // ----------------------------------------------------------------------------
@@ -53,13 +59,16 @@ func (p *parser) appendGotoImports(list []Decl) []Decl {
 	path.Value = "\"fmt\""
 	path.Kind = StringLit
 
-	fmtDecl := new(ImportDecl)
-	fmtDecl.pos = p.pos()
-	fmtDecl.Path = path
-	fmtDecl.LocalPkgName = newName("__fmt")
-	// TODO  GOTO: Add something like var _ = ___fmt.Printf to silence unused import error
-	// TODO  GOTO: Alternatively, save if we used string interpolation and only add to the imports when that happened
-	list = append(list, fmtDecl)
+	if p.fmtString {
+		fmtDecl := new(ImportDecl)
+		fmtDecl.pos = p.pos()
+		fmtDecl.Path = path
+		fmtDecl.LocalPkgName = newName("__fmt")
+		// TODO  GOTO: Add something like var _ = ___fmt.Printf to silence unused import error
+		// TODO  GOTO: Alternatively, save if we used string interpolation and only add to the imports when that happened
+		list = append(list, fmtDecl)
+	}
+
 	return list
 }
 
@@ -214,6 +223,8 @@ func (p *parser) parseFormatString() Expr {
 	fmtCall.pos = p.pos()
 	fmtCall.Fun = fmtFunc
 	fmtCall.ArgList = args
+
+	p.fmtString = true
 
 	return fmtCall
 }
@@ -606,13 +617,7 @@ func (p *parser) fileOrNil() *File {
 	// { ( ImportDecl | TopLevelDecl ) ";" }
 	prev := _Import
 
-	// For Goto files, always import fmt
-
 	for p.tok != _EOF {
-		if p.isGoto() && p.tok != _Import && prev == _Import {
-			f.DeclList = p.appendGotoImports(f.DeclList)
-		}
-
 		if p.tok == _Import && prev != _Import {
 			p.syntaxError("imports must appear before other declarations")
 		}
@@ -666,6 +671,10 @@ func (p *parser) fileOrNil() *File {
 		}
 	}
 	// p.tok == _EOF
+
+	if p.isGoto() {
+		f.DeclList = p.appendGotoImports(f.DeclList)
+	}
 
 	p.clearPragma()
 	f.EOF = p.pos()
