@@ -110,6 +110,14 @@ func (p *parser) parseIdent(str string) (name *Name) {
 	return
 }
 
+func (p *parser) parseExpression(str string) (expr Expr) {
+	var exprParser parser
+	reader := strings.NewReader(str)
+	exprParser.init(p.file, reader, p.errh, p.pragh, p.mode)
+	exprParser.next()
+	return exprParser.expr()
+}
+
 // parses a goto format string and returns the corresponding fmt.Sprintf function call
 func (p *parser) parseFormatString() Expr {
 	lit := p.oliteral()
@@ -206,12 +214,10 @@ func (p *parser) parseFormatString() Expr {
 	fmtString.Kind = StringLit
 	fmtString.Value = builder.String()
 
-	// TODO  GOTO: Allow all kinds of expression instead of just identifiers.
-	// 	Create a new parser for each expression? Or move this to scanner and handle it earlier?
 	args := []Expr{fmtString}
 	for _, elem := range exprs {
-		ident := p.parseIdent(elem)
-		args = append(args, ident)
+		expr := p.parseExpression(elem)
+		args = append(args, expr)
 	}
 
 	fmtFunc := &SelectorExpr{}
