@@ -323,6 +323,7 @@ func traceAdvance(stopTrace bool) {
 		gp           *g
 		goid         uint64
 		mid          int64
+		stackID      uint64
 		status       uint32
 		waitreason   waitReason
 		inMarkAssist bool
@@ -346,7 +347,7 @@ func traceAdvance(stopTrace bool) {
 			me := getg().m.curg
 			// We don't have to handle this G status transition because we
 			// already eliminated ourselves from consideration above.
-			casGToWaiting(me, _Grunning, waitReasonTraceGoroutineStatus)
+			casGToWaitingForGC(me, _Grunning, waitReasonTraceGoroutineStatus)
 			// We need to suspend and take ownership of the G to safely read its
 			// goid. Note that we can't actually emit the event at this point
 			// because we might stop the G in a window where it's unsafe to write
@@ -366,6 +367,7 @@ func traceAdvance(stopTrace bool) {
 				ug.status = readgstatus(s.g) &^ _Gscan
 				ug.waitreason = s.g.waitreason
 				ug.inMarkAssist = s.g.inMarkAssist
+				ug.stackID = traceStack(0, gp, gen)
 			}
 			resumeG(s)
 			casgstatus(me, _Gwaiting, _Grunning)
@@ -542,24 +544,24 @@ func traceAdvance(stopTrace bool) {
 		// traced in gen between when we recorded it and now. If that's true, the goid
 		// and status we recorded then is exactly what we want right now.
 		status := goStatusToTraceGoStatus(ug.status, ug.waitreason)
-		statusWriter = statusWriter.writeGoStatus(ug.goid, ug.mid, status, ug.inMarkAssist)
+		statusWriter = statusWriter.writeGoStatus(ug.goid, ug.mid, status, ug.inMarkAssist, ug.stackID)
 	}
 	statusWriter.flush().end()
 
 	// Read everything out of the last gen's CPU profile buffer.
 	traceReadCPU(gen)
 
-	systemstack(func() {
-		// Flush CPU samples, stacks, and strings for the last generation. This is safe,
-		// because we're now certain no M is writing to the last generation.
-		//
-		// Ordering is important here. traceCPUFlush may generate new stacks and dumping
-		// stacks may generate new strings.
-		traceCPUFlush(gen)
-		trace.stackTab[gen%2].dump(gen)
-		trace.stringTab[gen%2].reset(gen)
+	// Flush CPU samples, stacks, and strings for the last generation. This is safe,
+	// because we're now certain no M is writing to the last generation.
+	//
+	// Ordering is important here. traceCPUFlush may generate new stacks and dumping
+	// stacks may generate new strings.
+	traceCPUFlush(gen)
+	trace.stackTab[gen%2].dump(gen)
+	trace.stringTab[gen%2].reset(gen)
 
-		// That's it. This generation is done producing buffers.
+	// That's it. This generation is done producing buffers.
+	systemstack(func() {
 		lock(&trace.lock)
 		trace.flushedGen.Store(gen)
 		unlock(&trace.lock)

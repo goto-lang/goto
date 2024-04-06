@@ -261,7 +261,7 @@ func Replace[S ~[]E, E any](s S, i, j int, v ...E) S {
 	if j == len(s) {
 		s2 := append(s[:i], v...)
 		if len(s2) < len(s) {
-			clear(s[len(s2):len(s)]) // zero/nil out the obsolete elements, for GC
+			clear(s[len(s2):]) // zero/nil out the obsolete elements, for GC
 		}
 		return s2
 	}
@@ -477,7 +477,7 @@ func Concat[S ~[]E, E any](slices ...S) S {
 }
 
 // Repeat returns a new slice that repeats the provided slice the given number of times.
-// The result has length and capacity len(x) * count.
+// The result has length and capacity (len(x) * count).
 // The result is never nil.
 // Repeat panics if count is negative or if the result of (len(x) * count)
 // overflows.
