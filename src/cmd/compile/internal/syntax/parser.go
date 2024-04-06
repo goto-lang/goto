@@ -115,7 +115,13 @@ func (p *parser) parseExpression(str string) (expr Expr) {
 	reader := strings.NewReader(str)
 	exprParser.init(p.file, reader, p.errh, p.pragh, p.mode)
 	exprParser.next()
-	return exprParser.expr()
+	expr = exprParser.expr()
+	exprParser.next()
+	if exprParser.tok != _EOF {
+		p.error("unexpected token after parsing expression argument in format string")
+	}
+
+	return
 }
 
 // parses a goto format string and returns the corresponding fmt.Sprintf function call
@@ -203,6 +209,11 @@ func (p *parser) parseFormatString() Expr {
 		if escape {
 			builder.WriteRune('\\')
 			escape = false
+		}
+
+		// we have to escape % signs in format strings as %%
+		if r == '%' {
+			builder.WriteRune('%')
 		}
 
 		builder.WriteRune(r)
