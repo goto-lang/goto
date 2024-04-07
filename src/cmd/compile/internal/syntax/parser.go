@@ -35,7 +35,7 @@ type parser struct {
 	xnest  int    // expression nesting level (for complit ambiguity resolution)
 	indent []byte // tracing support
 
-	gotoFeatures
+	features gotoFeatures
 }
 
 type gotoFeatures struct {
@@ -45,12 +45,16 @@ type gotoFeatures struct {
 // ----------------------------------------------------------------------------
 // Goto-Lang additional functions
 
-// enable goto-lang features / alternate goto-lang syntax
-func (p *parser) isGoto() bool {
+func (p *parser) isGotoFile() bool {
 	if p.file == nil {
 		return false
 	}
 	return strings.HasSuffix(p.file.filename, ".goto")
+}
+
+// enable goto-lang features / alternate goto-lang syntax
+func (s *scanner) isGoto() bool {
+	return s.isgoto
 }
 
 // append imports that Goto uses as part of its standard library, e.g. fmt - if they are not already imported
@@ -59,7 +63,7 @@ func (p *parser) appendGotoImports(list []Decl) []Decl {
 	path.Value = "\"fmt\""
 	path.Kind = StringLit
 
-	if p.fmtString {
+	if p.features.fmtString {
 		fmtDecl := new(ImportDecl)
 		fmtDecl.pos = p.pos()
 		fmtDecl.Path = path
@@ -227,8 +231,8 @@ func (p *parser) parseFormatString() Expr {
 
 	args := []Expr{fmtString}
 	for _, elem := range exprs {
-		expr := p.parseExpression(elem)
-		args = append(args, expr)
+		exp := p.parseExpression(elem)
+		args = append(args, exp)
 	}
 
 	fmtFunc := &SelectorExpr{}
@@ -241,7 +245,7 @@ func (p *parser) parseFormatString() Expr {
 	fmtCall.Fun = fmtFunc
 	fmtCall.ArgList = args
 
-	p.fmtString = true
+	p.features.fmtString = true
 
 	return fmtCall
 }
@@ -255,6 +259,7 @@ func (p *parser) init(file *PosBase, r io.Reader, errh ErrorHandler, pragh Pragm
 	p.errh = errh
 	p.mode = mode
 	p.pragh = pragh
+	p.isgoto = p.isGotoFile()
 	p.scanner.init(
 		r,
 		// Error and directive handler for scanner.

@@ -41,6 +41,8 @@ type scanner struct {
 	kind      LitKind  // valid if tok is _Literal
 	op        Operator // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
 	prec      int      // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
+
+	isgoto bool // if additional goto features should be enabled in scanner
 }
 
 func (s *scanner) init(src io.Reader, errh func(line, col uint, msg string), mode uint) {
@@ -125,7 +127,11 @@ redo:
 		s.number(false)
 
 	case '"':
-		s.stdString()
+		if s.isgoto {
+			s.fmtString()
+		} else {
+			s.stdString()
+		}
 
 	case '`':
 		s.rawString()
@@ -671,7 +677,53 @@ func (s *scanner) rune() {
 	s.setLit(RuneLit, ok)
 }
 
-// TODO  GOTO: probably create a fmtString method here that is invoked instead of stdString that already handles format groups
+func (s *scanner) fmtString() {
+	// TODO  GOTO: Handle fmt string arguments here already
+	ok := true
+	s.nextch()
+
+	openParens := 0
+	fmtArg := false
+	for {
+		if s.ch == '"' && openParens == 0 {
+			s.nextch()
+			break
+		}
+		if s.ch == '\\' {
+			s.nextch()
+
+			if !fmtArg && s.ch == '(' {
+				openParens = 1
+				fmtArg = true
+			}
+
+			if !s.escape('"') {
+				ok = false
+			}
+			continue
+		}
+		if s.ch == '\n' {
+			s.errorf("newline in string")
+			ok = false
+			break
+		}
+		if s.ch < 0 {
+			s.errorAtf(0, "string not terminated")
+			ok = false
+			break
+		}
+		if s.ch == '(' && fmtArg {
+			openParens++
+		}
+		if s.ch == ')' && fmtArg {
+			openParens--
+			fmtArg = openParens != 0
+		}
+		s.nextch()
+	}
+
+	s.setLit(StringLit, ok)
+}
 
 func (s *scanner) stdString() {
 	ok := true
@@ -828,6 +880,10 @@ func (s *scanner) escape(quote rune) bool {
 
 	switch s.ch {
 	case quote, 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', '(':
+		if s.ch == '(' && !s.isgoto {
+			s.errorf("\\( is only allowed in .goto files")
+			return false
+		}
 		s.nextch()
 		return true
 	case '0', '1', '2', '3', '4', '5', '6', '7':
