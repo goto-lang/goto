@@ -692,8 +692,8 @@ func (s *scanner) fmtString() {
 		if s.ch == '\\' {
 			s.nextch()
 
-			if !fmtArg && s.ch == '(' {
-				openParens = 1
+			if s.ch == '(' {
+				openParens++
 				fmtArg = true
 			}
 
