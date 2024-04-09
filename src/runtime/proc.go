@@ -1322,8 +1322,10 @@ var stwReasonStrings = [...]string{
 // worldStop provides context from the stop-the-world required by the
 // start-the-world.
 type worldStop struct {
-	reason stwReason
-	start  int64
+	reason           stwReason
+	startedStopping  int64
+	finishedStopping int64
+	stoppingCPUTime  int64
 }
 
 // Temporary variable for stopTheWorld, when it can't write to the stack.
@@ -1479,6 +1481,7 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 	preemptall()
 	// stop current P
 	gp.m.p.ptr().status = _Pgcstop // Pgcstop is only diagnostic.
+	gp.m.p.ptr().gcStopTime = start
 	sched.stopwait--
 	// try to retake all P's in Psyscall status
 	trace = traceAcquire()
@@ -1490,6 +1493,7 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 				trace.ProcSteal(pp, false)
 			}
 			pp.syscalltick++
+			pp.gcStopTime = nanotime()
 			sched.stopwait--
 		}
 	}
@@ -1505,6 +1509,7 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 			break
 		}
 		pp.status = _Pgcstop
+		pp.gcStopTime = nanotime()
 		sched.stopwait--
 	}
 	wait := sched.stopwait > 0
@@ -1522,14 +1527,19 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 		}
 	}
 
-	startTime := nanotime() - start
+	finish := nanotime()
+	startTime := finish - start
 	if reason.isGC() {
 		sched.stwStoppingTimeGC.record(startTime)
 	} else {
 		sched.stwStoppingTimeOther.record(startTime)
 	}
 
-	// sanity checks
+	// Double-check we actually stopped everything, and all the invariants hold.
+	// Also accumulate all the time spent by each P in _Pgcstop up to the point
+	// where everything was stopped. This will be accumulated into the total pause
+	// CPU time by the caller.
+	stoppingCPUTime := int64(0)
 	bad := ""
 	if sched.stopwait != 0 {
 		bad = "stopTheWorld: not stopped (stopwait != 0)"
@@ -1538,6 +1548,11 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 			if pp.status != _Pgcstop {
 				bad = "stopTheWorld: not stopped (status != _Pgcstop)"
 			}
+			if pp.gcStopTime == 0 && bad == "" {
+				bad = "stopTheWorld: broken CPU time accounting"
+			}
+			stoppingCPUTime += finish - pp.gcStopTime
+			pp.gcStopTime = 0
 		}
 	}
 	if freezing.Load() {
@@ -1554,7 +1569,12 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 
 	worldStopped()
 
-	return worldStop{reason: reason, start: start}
+	return worldStop{
+		reason:           reason,
+		startedStopping:  start,
+		finishedStopping: finish,
+		stoppingCPUTime:  stoppingCPUTime,
+	}
 }
 
 // reason is the same STW reason passed to stopTheWorld. start is the start
@@ -1610,7 +1630,7 @@ func startTheWorldWithSema(now int64, w worldStop) int64 {
 	if now == 0 {
 		now = nanotime()
 	}
-	totalTime := now - w.start
+	totalTime := now - w.startedStopping
 	if w.reason.isGC() {
 		sched.stwTotalTimeGC.record(totalTime)
 	} else {
@@ -2943,6 +2963,7 @@ func handoffp(pp *p) {
 	lock(&sched.lock)
 	if sched.gcwaiting.Load() {
 		pp.status = _Pgcstop
+		pp.gcStopTime = nanotime()
 		sched.stopwait--
 		if sched.stopwait == 0 {
 			notewakeup(&sched.stopnote)
@@ -3085,6 +3106,7 @@ func gcstopm() {
 	pp := releasep()
 	lock(&sched.lock)
 	pp.status = _Pgcstop
+	pp.gcStopTime = nanotime()
 	sched.stopwait--
 	if sched.stopwait == 0 {
 		notewakeup(&sched.stopnote)
@@ -4402,6 +4424,7 @@ func entersyscall_gcwait() {
 			}
 			traceRelease(trace)
 		}
+		pp.gcStopTime = nanotime()
 		pp.syscalltick++
 		if sched.stopwait--; sched.stopwait == 0 {
 			notewakeup(&sched.stopnote)
