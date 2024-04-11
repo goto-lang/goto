@@ -10,8 +10,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 )
 
 const debug = false
@@ -81,37 +79,6 @@ func newName(val string) *Name {
 	name.Value = val
 
 	return name
-}
-
-func (p *parser) parseIdent(str string) (name *Name) {
-	// TODO  GOTO: Handle that string could be a keyword
-	name = new(Name)
-	str = strings.TrimSpace(str)
-	if len(str) == 0 {
-		p.errorf("argument in format string cannot consist only of whitespace")
-		return
-	}
-
-	for i, ch := range str {
-		switch {
-		case unicode.IsLetter(ch) || ch == '_':
-			continue
-		case unicode.IsDigit(ch):
-			if i == 0 {
-				p.errorf("identifier cannot begin with digit %#U", ch)
-				return
-			}
-		case ch >= utf8.RuneSelf:
-			p.errorf("invalid character %#U in identifier", ch)
-			return
-		default:
-			p.errorf("invalid identifier \"%v\" in format string", str)
-			return
-		}
-	}
-
-	name.Value = str
-	return
 }
 
 func (p *parser) parseExpression(str string) (expr Expr) {
