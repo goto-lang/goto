@@ -1566,7 +1566,7 @@ func newNonNil(pos Pos, typ Expr) Expr {
 //	Type     = TypeName | TypeLit | "(" Type ")" .
 //	TypeName = identifier | QualifiedIdent .
 //	TypeLit  = ArrayType | StructType | PointerType | FunctionType | InterfaceType |
-//		      SliceType | MapType | Channel_Type .
+//		      SliceType | MapType | Channel_Type | EnumType .
 func (p *parser) typeOrNil() Expr {
 	if trace {
 		defer p.trace("typeOrNil")()
@@ -1605,6 +1605,14 @@ func (p *parser) typeOrNil() Expr {
 		t.Elem = p.chanElem()
 		return t
 
+	case _Enum:
+		p.next()
+		p.want(_Lbrack)
+
+		// TODO: handle actual enum parsing in here.
+		panic("TODO: enums")
+
+		p.want(_Rbrack)
 	case _Func:
 		// fntype
 		p.next()

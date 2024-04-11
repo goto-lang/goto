@@ -388,11 +388,17 @@ func (s *scanner) ident() {
 	lit := s.segment()
 	if len(lit) >= 2 {
 		if tok := keywordMap[hash(lit)]; tok != 0 && tokStrFast(tok) == string(lit) {
+			if !s.isgoto && tok == _Enum {
+				goto not_goto_kw
+			}
+
 			s.nlsemi = contains(1<<_Break|1<<_Continue|1<<_Fallthrough|1<<_Return, tok)
 			s.tok = tok
 			return
 		}
 	}
+
+	not_goto_kw:
 
 	s.nlsemi = true
 	s.lit = string(lit)
@@ -431,7 +437,7 @@ var keywordMap [1 << 6]token // size must be power of two
 
 func init() {
 	// populate keywordMap
-	for tok := _Break; tok <= _Var; tok++ {
+	for tok := _Break; tok <= _Enum; tok++ {
 		h := hash([]byte(tok.String()))
 		if keywordMap[h] != 0 {
 			panic("imperfect hash")

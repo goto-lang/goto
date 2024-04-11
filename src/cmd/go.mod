@@ -1,6 +1,6 @@
 module cmd
 
-go 1.23
+go 1.22
 
 require (
 	github.com/google/pprof v0.0.0-20240207164012-fb44976bdcd5
