@@ -683,7 +683,6 @@ func (s *scanner) fmtString() {
 	s.nextch()
 
 	openParens := 0
-	fmtArg := false
 	for {
 		if s.ch == '"' && openParens == 0 {
 			s.nextch()
@@ -694,7 +693,6 @@ func (s *scanner) fmtString() {
 
 			if s.ch == '(' {
 				openParens++
-				fmtArg = true
 			}
 
 			if !s.escape('"') {
@@ -712,12 +710,11 @@ func (s *scanner) fmtString() {
 			ok = false
 			break
 		}
-		if s.ch == '(' && fmtArg {
+		if s.ch == '(' && openParens != 0 {
 			openParens++
 		}
-		if s.ch == ')' && fmtArg {
+		if s.ch == ')' && openParens != 0 {
 			openParens--
-			fmtArg = openParens != 0
 		}
 		s.nextch()
 	}
