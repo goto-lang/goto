@@ -2287,8 +2287,9 @@ func StructOf(fields []StructField) Type {
 		// Update string and hash
 		name := f.Name.Name()
 		hash = fnv1(hash, []byte(name)...)
-		repr = append(repr, (" " + name)...)
-		if f.Embedded() {
+		if !f.Embedded() {
+			repr = append(repr, (" " + name)...)
+		} else {
 			// Embedded field
 			if f.Typ.Kind() == abi.Pointer {
 				// Embedded ** and *interface{} are illegal
@@ -2935,14 +2936,14 @@ func addTypeBits(bv *bitVector, offset uintptr, t *abi.Type) {
 	switch Kind(t.Kind_ & abi.KindMask) {
 	case Chan, Func, Map, Pointer, Slice, String, UnsafePointer:
 		// 1 pointer at start of representation
-		for bv.n < uint32(offset/uintptr(goarch.PtrSize)) {
+		for bv.n < uint32(offset/goarch.PtrSize) {
 			bv.append(0)
 		}
 		bv.append(1)
 
 	case Interface:
 		// 2 pointers
-		for bv.n < uint32(offset/uintptr(goarch.PtrSize)) {
+		for bv.n < uint32(offset/goarch.PtrSize) {
 			bv.append(0)
 		}
 		bv.append(1)

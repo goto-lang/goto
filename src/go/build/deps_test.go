@@ -77,6 +77,7 @@ var depsRules = `
 	< internal/race
 	< internal/msan
 	< internal/asan
+	< internal/weak
 	< sync
 	< internal/bisect
 	< internal/godebug
@@ -146,6 +147,9 @@ var depsRules = `
 
 	MATH
 	< runtime/metrics;
+
+	RUNTIME, math/rand/v2
+	< internal/concurrent;
 
 	MATH, unicode/utf8
 	< strconv;
