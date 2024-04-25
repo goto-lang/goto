@@ -11,7 +11,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/token"
-	"go/parser2"
 	"io"
 	"io/fs"
 	"os"
@@ -85,10 +84,6 @@ const (
 func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast.File, err error) {
 	if fset == nil {
 		panic("parser.ParseFile: no token.FileSet provided (fset == nil)")
-	}
-
-	if strings.HasSuffix(filename, ".goto") {
-		return parser2.ParseFile(fset, filename, src, parser2.Mode(mode))
 	}
 
 	// get source

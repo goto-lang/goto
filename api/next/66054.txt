@@ -1,23 +1,2 @@
 pkg debug/elf, const PT_OPENBSD_NOBTCFI = 1705237480 #66054
 pkg debug/elf, const PT_OPENBSD_NOBTCFI ProgType #66054
-pkg go/parser2, const AllErrors = 32 #66054
-pkg go/parser2, const AllErrors Mode #66054  
-pkg go/parser2, const DeclarationErrors = 16 #66054
-pkg go/parser2, const DeclarationErrors Mode #66054  
-pkg go/parser2, const ImportsOnly = 2 #66054  
-pkg go/parser2, const ImportsOnly Mode #66054  
-pkg go/parser2, const PackageClauseOnly = 1 #66054  
-pkg go/parser2, const PackageClauseOnly Mode #66054  
-pkg go/parser2, const ParseComments = 4 #66054  
-pkg go/parser2, const ParseComments Mode #66054  
-pkg go/parser2, const SkipObjectResolution = 64 #66054  
-pkg go/parser2, const SkipObjectResolution Mode #66054  
-pkg go/parser2, const SpuriousErrors = 32 #66054  
-pkg go/parser2, const SpuriousErrors Mode #66054  
-pkg go/parser2, const Trace = 8 #66054  
-pkg go/parser2, const Trace Mode #66054  
-pkg go/parser2, func ParseDir(*token.FileSet, string, func(fs.FileInfo) bool, Mode) (map[string]*ast.Package, error) #66054  
-pkg go/parser2, func ParseExpr(string) (ast.Expr, error) #66054  
-pkg go/parser2, func ParseExprFrom(*token.FileSet, string, interface{}, Mode) (ast.Expr, error) #66054  
-pkg go/parser2, func ParseFile(*token.FileSet, string, interface{}, Mode) (*ast.File, error) #66054  
-pkg go/parser2, type Mode uint #66054  
