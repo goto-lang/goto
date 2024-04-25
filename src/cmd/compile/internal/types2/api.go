@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package types declares the data types and implements
+// Package types2 declares the data types and implements
 // the algorithms for type-checking of Go packages. Use
 // Config.Check to invoke the type checker for a package.
 // Alternatively, create a new type checker with NewChecker
@@ -475,10 +475,3 @@ func (conf *Config) Check(path string, files []*syntax.File, info *Info) (*Packa
 	pkg := NewPackage(path, "")
 	return pkg, NewChecker(conf, pkg, info).Files(files)
 }
-
-// Rhs returns the type R on the right-hand side of an alias
-// declaration "type A = R", which may be another alias.
-//
-// TODO(adonovan): move to alias.go (common with go/types) once
-// proposal #66559 is accepted.
-func (a *Alias) Rhs() Type { return a.fromRHS }
