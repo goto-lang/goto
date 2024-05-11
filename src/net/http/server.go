@@ -224,7 +224,7 @@ type CloseNotifier interface {
 	// that the channel receives a value.
 	//
 	// If the protocol is HTTP/1.1 and CloseNotify is called while
-	// processing an idempotent request (such a GET) while
+	// processing an idempotent request (such as GET) while
 	// HTTP/1.1 pipelining is in use, the arrival of a subsequent
 	// pipelined request may cause a value to be sent on the
 	// returned channel. In practice HTTP/1.1 pipelining is not
@@ -1102,9 +1102,9 @@ func (w *response) Header() Header {
 
 // maxPostHandlerReadBytes is the max number of Request.Body bytes not
 // consumed by a handler that the server will read from the client
-// in order to keep a connection alive. If there are more bytes than
-// this then the server to be paranoid instead sends a "Connection:
-// close" response.
+// in order to keep a connection alive. If there are more bytes
+// than this, the server, to be paranoid, instead sends a
+// "Connection close" response.
 //
 // This number is approximately what a typical machine's TCP buffer
 // size is anyway.  (if we have the bytes on the machine, we might as
@@ -2175,10 +2175,23 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 // It does not otherwise end the request; the caller should ensure no further
 // writes are done to w.
 // The error message should be plain text.
+//
+// Error deletes the Content-Length and Content-Encoding headers,
+// sets Content-Type to “text/plain; charset=utf-8”,
+// and sets X-Content-Type-Options to “nosniff”.
+// This configures the header properly for the error message,
+// in case the caller had set it up expecting a successful output.
 func Error(w ResponseWriter, error string, code int) {
-	w.Header().Del("Content-Length")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	h := w.Header()
+	// We delete headers which might be valid for some other content,
+	// but not anymore for the error content.
+	h.Del("Content-Length")
+	h.Del("Content-Encoding")
+
+	// There might be content type already set, but we reset it to
+	// text/plain for the error message.
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	fmt.Fprintln(w, error)
 }

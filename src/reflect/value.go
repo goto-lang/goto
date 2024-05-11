@@ -624,7 +624,7 @@ func (v Value) call(op string, in []Value) []Value {
 			}
 
 			// Handle pointers passed in registers.
-			if !ifaceIndir(tv) {
+			if !tv.IfaceIndir() {
 				// Pointer-valued data gets put directly
 				// into v.ptr.
 				if steps[0].kind != abiStepPointer {
@@ -714,7 +714,7 @@ func callReflect(ctxt *makeFuncImpl, frame unsafe.Pointer, retValid *bool, regs 
 		v := Value{typ, nil, flag(typ.Kind())}
 		steps := abid.call.stepsForValue(i)
 		if st := steps[0]; st.kind == abiStepStack {
-			if ifaceIndir(typ) {
+			if typ.IfaceIndir() {
 				// value cannot be inlined in interface data.
 				// Must make a copy, because f might keep a reference to it,
 				// and we cannot let f keep a reference to the stack frame
@@ -728,7 +728,7 @@ func callReflect(ctxt *makeFuncImpl, frame unsafe.Pointer, retValid *bool, regs 
 				v.ptr = *(*unsafe.Pointer)(add(ptr, st.stkOff, "1-ptr"))
 			}
 		} else {
-			if ifaceIndir(typ) {
+			if typ.IfaceIndir() {
 				// All that's left is values passed in registers that we need to
 				// create space for the values.
 				v.flag |= flagIndir
@@ -914,7 +914,7 @@ func storeRcvr(v Value, p unsafe.Pointer) {
 		// the interface data word becomes the receiver word
 		iface := (*nonEmptyInterface)(v.ptr)
 		*(*unsafe.Pointer)(p) = iface.word
-	} else if v.flag&flagIndir != 0 && !ifaceIndir(t) {
+	} else if v.flag&flagIndir != 0 && !t.IfaceIndir() {
 		*(*unsafe.Pointer)(p) = *(*unsafe.Pointer)(v.ptr)
 	} else {
 		*(*unsafe.Pointer)(p) = v.ptr
@@ -1232,7 +1232,7 @@ func (v Value) Elem() Value {
 	case Pointer:
 		ptr := v.ptr
 		if v.flag&flagIndir != 0 {
-			if ifaceIndir(v.typ()) {
+			if v.typ().IfaceIndir() {
 				// This is a pointer to a not-in-heap object. ptr points to a uintptr
 				// in the heap. That uintptr is the address of a not-in-heap object.
 				// In general, pointers to not-in-heap objects can be total junk.
@@ -1591,7 +1591,7 @@ func (v Value) IsZero() bool {
 			// v.ptr doesn't escape, as Equal functions are compiler generated
 			// and never escape. The escape analysis doesn't know, as it is a
 			// function pointer call.
-			return typ.Equal(abi.NoEscape(v.ptr), unsafe.Pointer(&zeroVal[0]))
+			return typ.Equal(abi.NoEscape(v.ptr), unsafe.Pointer(&abi.ZeroVal[0]))
 		}
 		if typ.TFlag&abi.TFlagRegularMemory != 0 {
 			// For some types where the zero value is a value where all bits of this type are 0
@@ -1617,7 +1617,7 @@ func (v Value) IsZero() bool {
 		// If the type is comparable, then compare directly with zero.
 		if typ.Equal != nil && typ.Size() <= abi.ZeroValSize {
 			// See noescape justification above.
-			return typ.Equal(abi.NoEscape(v.ptr), unsafe.Pointer(&zeroVal[0]))
+			return typ.Equal(abi.NoEscape(v.ptr), unsafe.Pointer(&abi.ZeroVal[0]))
 		}
 		if typ.TFlag&abi.TFlagRegularMemory != 0 {
 			// For some types where the zero value is a value where all bits of this type are 0
@@ -2258,7 +2258,7 @@ func (v Value) recv(nb bool) (val Value, ok bool) {
 	t := tt.Elem
 	val = Value{t, nil, flag(t.Kind())}
 	var p unsafe.Pointer
-	if ifaceIndir(t) {
+	if t.IfaceIndir() {
 		p = unsafe_New(t)
 		val.ptr = p
 		val.flag |= flagIndir
@@ -2312,7 +2312,7 @@ func (v Value) Set(x Value) {
 	}
 	x = x.assignTo("reflect.Set", v.typ(), target)
 	if x.flag&flagIndir != 0 {
-		if x.ptr == unsafe.Pointer(&zeroVal[0]) {
+		if x.ptr == unsafe.Pointer(&abi.ZeroVal[0]) {
 			typedmemclr(v.typ(), v.ptr)
 		} else {
 			typedmemmove(v.typ(), v.ptr, x.ptr)
@@ -3280,7 +3280,7 @@ func Zero(typ Type) Value {
 	if t.IfaceIndir() {
 		var p unsafe.Pointer
 		if t.Size() <= abi.ZeroValSize {
-			p = unsafe.Pointer(&zeroVal[0])
+			p = unsafe.Pointer(&abi.ZeroVal[0])
 		} else {
 			p = unsafe_New(t)
 		}
@@ -3288,9 +3288,6 @@ func Zero(typ Type) Value {
 	}
 	return Value{t, nil, fl}
 }
-
-//go:linkname zeroVal runtime.zeroVal
-var zeroVal [abi.ZeroValSize]byte
 
 // New returns a Value representing a pointer to a new zero value
 // for the specified type. That is, the returned Value's Type is [PointerTo](typ).
@@ -3300,7 +3297,7 @@ func New(typ Type) Value {
 	}
 	t := &typ.(*rtype).t
 	pt := ptrTo(t)
-	if ifaceIndir(pt) {
+	if pt.IfaceIndir() {
 		// This is a pointer to a not-in-heap type.
 		panic("reflect: New of type that may not be allocated in heap (possibly undefined cgo C type)")
 	}

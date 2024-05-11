@@ -35,9 +35,6 @@ time.
 The GODEBUG variable controls debugging variables within the runtime.
 It is a comma-separated list of name=val pairs setting these named variables:
 
-	allocfreetrace: setting allocfreetrace=1 causes every allocation to be
-	profiled and a stack trace printed on each object's allocation and free.
-
 	clobberfree: setting clobberfree=1 causes the garbage collector to
 	clobber the memory content of an object with bad content when it frees
 	the object.
@@ -198,9 +195,8 @@ It is a comma-separated list of name=val pairs setting these named variables:
 
 	tracebackancestors: setting tracebackancestors=N extends tracebacks with the stacks at
 	which goroutines were created, where N limits the number of ancestor goroutines to
-	report. This also extends the information returned by runtime.Stack. Ancestor's goroutine
-	IDs will refer to the ID of the goroutine at the time of creation; it's possible for this
-	ID to be reused for another goroutine. Setting N to 0 will report no ancestry information.
+	report. This also extends the information returned by runtime.Stack.
+	Setting N to 0 will report no ancestry information.
 
 	tracefpunwindoff: setting tracefpunwindoff=1 forces the execution tracer to
 	use the runtime's default stack unwinder instead of frame pointer unwinding.

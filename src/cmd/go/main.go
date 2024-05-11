@@ -3,12 +3,10 @@
 // license that can be found in the LICENSE file.
 
 //go:generate go test cmd/go -v -run=^TestDocsUpToDate$ -fixdocs
-//go:generate go test cmd/go -v -run=^TestCounterNamesUpToDate$ -update
 
 package main
 
 import (
-	"cmd/internal/telemetry"
 	"context"
 	"flag"
 	"fmt"
@@ -44,6 +42,7 @@ import (
 	"cmd/go/internal/vet"
 	"cmd/go/internal/work"
 	"cmd/go/internal/workcmd"
+	"cmd/internal/telemetry"
 )
 
 func init() {
@@ -89,7 +88,7 @@ func init() {
 
 var _ = go11tag
 
-var counterErrorsGOPATHEntryRelative = base.NewCounter("go/errors:gopath-entry-relative")
+var counterErrorsGOPATHEntryRelative = telemetry.NewCounter("go/errors:gopath-entry-relative")
 
 func main() {
 	log.SetFlags(0)
@@ -99,6 +98,7 @@ func main() {
 
 	flag.Usage = base.Usage
 	flag.Parse()
+	telemetry.Inc("go/invocations")
 	telemetry.CountFlags("go/flag:", *flag.CommandLine)
 
 	args := flag.Args()
@@ -253,7 +253,9 @@ func invoke(cmd *base.Command, args []string) {
 	} else {
 		base.SetFromGOFLAGS(&cmd.Flag)
 		cmd.Flag.Parse(args[1:])
-		telemetry.CountFlags("go/flag:"+strings.ReplaceAll(cfg.CmdName, " ", "-")+"-", cmd.Flag)
+		flagCounterPrefix := "go/" + strings.ReplaceAll(cfg.CmdName, " ", "-") + "/flag"
+		telemetry.CountFlags(flagCounterPrefix+":", cmd.Flag)
+		telemetry.CountFlagValue(flagCounterPrefix+"/", cmd.Flag, "buildmode")
 		args = cmd.Flag.Args()
 	}
 
