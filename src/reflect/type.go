@@ -935,6 +935,16 @@ func canRangeFunc2(t *abi.Type) bool {
 // record why the addition is safe, which is to say why the addition
 // does not cause x to advance to the very end of p's allocation
 // and therefore point incorrectly at the next block in memory.
+//
+// add should be an internal detail (and is trivially copyable),
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/vmware/govmomi
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname add
 func add(p unsafe.Pointer, x uintptr, whySafe string) unsafe.Pointer {
 	return unsafe.Pointer(uintptr(p) + x)
 }
@@ -1632,6 +1642,15 @@ func haveIdenticalUnderlyingType(T, V *abi.Type, cmpTags bool) bool {
 // pointers, channels, maps, slices, and arrays.
 func typelinks() (sections []unsafe.Pointer, offset [][]int32)
 
+// rtypeOff should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/goccy/go-json
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname rtypeOff
 func rtypeOff(section unsafe.Pointer, off int32) *abi.Type {
 	return (*abi.Type)(add(section, uintptr(off), "sizeof(rtype) > 0"))
 }
@@ -1640,6 +1659,16 @@ func rtypeOff(section unsafe.Pointer, off int32) *abi.Type {
 // the given string representation.
 // It may be empty (no known types with that string) or may have
 // multiple elements (multiple types with that string).
+//
+// typesByString should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/aristanetworks/goarista
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname typesByString
 func typesByString(s string) []*abi.Type {
 	sections, offset := typelinks()
 	var ret []*abi.Type
@@ -2887,6 +2916,16 @@ func appendVarint(x []byte, v uintptr) []byte {
 // a nil *rtype must be replaced by a nil Type, but in gccgo this
 // function takes care of ensuring that multiple *rtype for the same
 // type are coalesced into a single Type.
+//
+// toType should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/goccy/go-json
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname toType
 func toType(t *abi.Type) Type {
 	if t == nil {
 		return nil
@@ -3030,11 +3069,4 @@ func TypeFor[T any]() Type {
 		return t // optimize for T being a non-interface kind
 	}
 	return TypeOf((*T)(nil)).Elem() // only for an interface kind
-}
-
-// ifaceIndir reports whether t is stored indirectly in an interface value.
-// This function is no longer called by the reflect package,
-// and https://go.dev/issue/67279 tracks its deletion.
-func ifaceIndir(t *abi.Type) bool {
-	return t.Kind_&abi.KindDirectIface == 0
 }

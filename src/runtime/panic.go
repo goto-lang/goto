@@ -8,6 +8,7 @@ import (
 	"internal/abi"
 	"internal/goarch"
 	"internal/runtime/atomic"
+	"internal/stringslite"
 	"runtime/internal/sys"
 	"unsafe"
 )
@@ -53,7 +54,7 @@ const (
 // pc should be the program counter of the compiler-generated code that
 // triggered this panic.
 func panicCheck1(pc uintptr, msg string) {
-	if goarch.IsWasm == 0 && hasPrefix(funcname(findfunc(pc)), "runtime.") {
+	if goarch.IsWasm == 0 && stringslite.HasPrefix(funcname(findfunc(pc)), "runtime.") {
 		// Note: wasm can't tail call, so we can't get the original caller's pc.
 		throw(msg)
 	}
@@ -296,11 +297,24 @@ func deferproc(fn func()) {
 	// been set and must not be clobbered.
 }
 
-var rangeExitError = error(errorString("range function continued iteration after exit"))
+var rangeDoneError = error(errorString("range function continued iteration after function for loop body returned false"))
+var rangePanicError = error(errorString("range function continued iteration after loop body panic"))
+var rangeExhaustedError = error(errorString("range function continued iteration after whole loop exit"))
+var rangeMissingPanicError = error(errorString("range function recovered a loop body panic and did not resume panicking"))
 
 //go:noinline
-func panicrangeexit() {
-	panic(rangeExitError)
+func panicrangestate(state int) {
+	switch abi.RF_State(state) {
+	case abi.RF_DONE:
+		panic(rangeDoneError)
+	case abi.RF_PANIC:
+		panic(rangePanicError)
+	case abi.RF_EXHAUSTED:
+		panic(rangeExhaustedError)
+	case abi.RF_MISSING_PANIC:
+		panic(rangeMissingPanicError)
+	}
+	throw("unexpected state passed to panicrangestate")
 }
 
 // deferrangefunc is called by functions that are about to
@@ -1013,14 +1027,26 @@ func sync_fatal(s string) {
 // NOTE: temporarily marked "go:noinline" pending investigation/fix of
 // issue #67274, so as to fix longtest builders.
 //
+// throw should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//   - github.com/cockroachdb/pebble
+//   - github.com/dgraph-io/ristretto
+//   - github.com/outcaste-io/ristretto
+//   - gvisor.dev/gvisor
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname throw
 //go:nosplit
-//go:noinline
 func throw(s string) {
 	// Everything throw does should be recursively nosplit so it
 	// can be called even when it's unsafe to grow the stack.
 	systemstack(func() {
 		print("fatal error: ")
-		printpanicval(s)
+		printindented(s) // logically printpanicval(s), but avoids convTstring write barrier
 		print("\n")
 	})
 
@@ -1041,7 +1067,7 @@ func fatal(s string) {
 	// can be called even when it's unsafe to grow the stack.
 	systemstack(func() {
 		print("fatal error: ")
-		printpanicval(s)
+		printindented(s) // logically printpanicval(s), but avoids convTstring write barrier
 		print("\n")
 	})
 

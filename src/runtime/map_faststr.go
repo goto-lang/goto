@@ -16,7 +16,7 @@ func mapaccess1_faststr(t *maptype, h *hmap, ky string) unsafe.Pointer {
 		racereadpc(unsafe.Pointer(h), callerpc, abi.FuncPCABIInternal(mapaccess1_faststr))
 	}
 	if h == nil || h.count == 0 {
-		return unsafe.Pointer(&abi.ZeroVal[0])
+		return unsafe.Pointer(&zeroVal[0])
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
@@ -39,7 +39,7 @@ func mapaccess1_faststr(t *maptype, h *hmap, ky string) unsafe.Pointer {
 					return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*2*goarch.PtrSize+i*uintptr(t.ValueSize))
 				}
 			}
-			return unsafe.Pointer(&abi.ZeroVal[0])
+			return unsafe.Pointer(&zeroVal[0])
 		}
 		// long key, try not to do more comparisons than necessary
 		keymaybe := uintptr(abi.MapBucketCount)
@@ -74,7 +74,7 @@ func mapaccess1_faststr(t *maptype, h *hmap, ky string) unsafe.Pointer {
 				return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*2*goarch.PtrSize+keymaybe*uintptr(t.ValueSize))
 			}
 		}
-		return unsafe.Pointer(&abi.ZeroVal[0])
+		return unsafe.Pointer(&zeroVal[0])
 	}
 dohash:
 	hash := t.Hasher(noescape(unsafe.Pointer(&ky)), uintptr(h.hash0))
@@ -102,16 +102,25 @@ dohash:
 			}
 		}
 	}
-	return unsafe.Pointer(&abi.ZeroVal[0])
+	return unsafe.Pointer(&zeroVal[0])
 }
 
+// mapaccess2_faststr should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/ugorji/go/codec
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname mapaccess2_faststr
 func mapaccess2_faststr(t *maptype, h *hmap, ky string) (unsafe.Pointer, bool) {
 	if raceenabled && h != nil {
 		callerpc := getcallerpc()
 		racereadpc(unsafe.Pointer(h), callerpc, abi.FuncPCABIInternal(mapaccess2_faststr))
 	}
 	if h == nil || h.count == 0 {
-		return unsafe.Pointer(&abi.ZeroVal[0]), false
+		return unsafe.Pointer(&zeroVal[0]), false
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
@@ -134,7 +143,7 @@ func mapaccess2_faststr(t *maptype, h *hmap, ky string) (unsafe.Pointer, bool) {
 					return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*2*goarch.PtrSize+i*uintptr(t.ValueSize)), true
 				}
 			}
-			return unsafe.Pointer(&abi.ZeroVal[0]), false
+			return unsafe.Pointer(&zeroVal[0]), false
 		}
 		// long key, try not to do more comparisons than necessary
 		keymaybe := uintptr(abi.MapBucketCount)
@@ -169,7 +178,7 @@ func mapaccess2_faststr(t *maptype, h *hmap, ky string) (unsafe.Pointer, bool) {
 				return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*2*goarch.PtrSize+keymaybe*uintptr(t.ValueSize)), true
 			}
 		}
-		return unsafe.Pointer(&abi.ZeroVal[0]), false
+		return unsafe.Pointer(&zeroVal[0]), false
 	}
 dohash:
 	hash := t.Hasher(noescape(unsafe.Pointer(&ky)), uintptr(h.hash0))
@@ -197,9 +206,20 @@ dohash:
 			}
 		}
 	}
-	return unsafe.Pointer(&abi.ZeroVal[0]), false
+	return unsafe.Pointer(&zeroVal[0]), false
 }
 
+// mapassign_faststr should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//   - github.com/cloudwego/frugal
+//   - github.com/ugorji/go/codec
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname mapassign_faststr
 func mapassign_faststr(t *maptype, h *hmap, s string) unsafe.Pointer {
 	if h == nil {
 		panic(plainError("assignment to entry in nil map"))

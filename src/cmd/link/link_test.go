@@ -1416,7 +1416,7 @@ func TestRandLayout(t *testing.T) {
 	}
 }
 
-func TestBlockedLinkname(t *testing.T) {
+func TestCheckLinkname(t *testing.T) {
 	// Test that code containing blocked linknames does not build.
 	testenv.MustHaveGoBuild(t)
 	t.Parallel()
@@ -1433,10 +1433,14 @@ func TestBlockedLinkname(t *testing.T) {
 		{"push.go", true},
 		// pull linkname of blocked symbol is not ok
 		{"coro.go", false},
-		{"weak.go", false},
 		{"coro_var.go", false},
 		// assembly reference is not ok
 		{"coro_asm", false},
+		// pull-only linkname is not ok
+		{"coro2.go", false},
+		// legacy bad linkname is ok, for now
+		{"fastrand.go", true},
+		{"badlinkname.go", true},
 	}
 	for _, test := range tests {
 		test := test

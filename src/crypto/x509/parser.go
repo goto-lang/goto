@@ -16,6 +16,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"internal/godebug"
 	"math/big"
 	"net"
 	"net/url"
@@ -415,6 +416,26 @@ func parseSANExtension(der cryptobyte.String) (dnsNames, emailAddresses []string
 	return
 }
 
+func parseAuthorityKeyIdentifier(e pkix.Extension) ([]byte, error) {
+	// RFC 5280, Section 4.2.1.1
+	if e.Critical {
+		// Conforming CAs MUST mark this extension as non-critical
+		return nil, errors.New("x509: authority key identifier incorrectly marked critical")
+	}
+	val := cryptobyte.String(e.Value)
+	var akid cryptobyte.String
+	if !val.ReadASN1(&akid, cryptobyte_asn1.SEQUENCE) {
+		return nil, errors.New("x509: invalid authority key identifier")
+	}
+	if akid.PeekASN1Tag(cryptobyte_asn1.Tag(0).ContextSpecific()) {
+		if !akid.ReadASN1(&akid, cryptobyte_asn1.Tag(0).ContextSpecific()) {
+			return nil, errors.New("x509: invalid authority key identifier")
+		}
+		return akid, nil
+	}
+	return nil, nil
+}
+
 func parseExtKeyUsageExtension(der cryptobyte.String) ([]ExtKeyUsage, []asn1.ObjectIdentifier, error) {
 	var extKeyUsages []ExtKeyUsage
 	var unknownUsages []asn1.ObjectIdentifier
@@ -722,21 +743,9 @@ func processExtensions(out *Certificate) error {
 				}
 
 			case 35:
-				// RFC 5280, 4.2.1.1
-				if e.Critical {
-					// Conforming CAs MUST mark this extension as non-critical
-					return errors.New("x509: authority key identifier incorrectly marked critical")
-				}
-				val := cryptobyte.String(e.Value)
-				var akid cryptobyte.String
-				if !val.ReadASN1(&akid, cryptobyte_asn1.SEQUENCE) {
-					return errors.New("x509: invalid authority key identifier")
-				}
-				if akid.PeekASN1Tag(cryptobyte_asn1.Tag(0).ContextSpecific()) {
-					if !akid.ReadASN1(&akid, cryptobyte_asn1.Tag(0).ContextSpecific()) {
-						return errors.New("x509: invalid authority key identifier")
-					}
-					out.AuthorityKeyId = akid
+				out.AuthorityKeyId, err = parseAuthorityKeyIdentifier(e)
+				if err != nil {
+					return err
 				}
 			case 37:
 				out.ExtKeyUsage, out.UnknownExtKeyUsage, err = parseExtKeyUsageExtension(e.Value)
@@ -815,6 +824,9 @@ func processExtensions(out *Certificate) error {
 	return nil
 }
 
+var x509negativeserial = godebug.New("x509negativeserial")
+var x509seriallength = godebug.New("x509seriallength")
+
 func parseCertificate(der []byte) (*Certificate, error) {
 	cert := &Certificate{}
 
@@ -854,15 +866,34 @@ func parseCertificate(der []byte) (*Certificate, error) {
 		return nil, errors.New("x509: invalid version")
 	}
 
-	serial := new(big.Int)
-	if !tbs.ReadASN1Integer(serial) {
+	var serialBytes cryptobyte.String
+	if !tbs.ReadASN1Element(&serialBytes, cryptobyte_asn1.INTEGER) {
 		return nil, errors.New("x509: malformed serial number")
 	}
-	// we ignore the presence of negative serial numbers because
-	// of their prevalence, despite them being invalid
-	// TODO(rolandshoemaker): revisit this decision, there are currently
-	// only 10 trusted certificates with negative serial numbers
-	// according to censys.io.
+	// We add two bytes for the tag and length (if the length was multi-byte,
+	// which is possible, the length of the serial would be more than 256 bytes,
+	// so this condition would trigger anyway).
+	if len(serialBytes) > 20+2 {
+		if x509seriallength.Value() != "1" {
+			return nil, errors.New("x509: serial number too long (>20 octets)")
+		} else {
+			x509seriallength.IncNonDefault()
+		}
+	}
+	serial := new(big.Int)
+	if !serialBytes.ReadASN1Integer(serial) {
+		return nil, errors.New("x509: malformed serial number")
+	}
+	// We do not reject zero serials, because they are unfortunately common
+	// in important root certificates which will not expire for a number of
+	// years.
+	if serial.Sign() == -1 {
+		if x509negativeserial.Value() != "1" {
+			return nil, errors.New("x509: negative serial number")
+		} else {
+			x509negativeserial.IncNonDefault()
+		}
+	}
 	cert.SerialNumber = serial
 
 	var sigAISeq cryptobyte.String
@@ -999,6 +1030,14 @@ func parseCertificate(der []byte) (*Certificate, error) {
 }
 
 // ParseCertificate parses a single certificate from the given ASN.1 DER data.
+//
+// Before Go 1.23, ParseCertificate accepted certificates with negative serial
+// numbers. This behavior can be restored by including "x509negativeserial=1" in
+// the GODEBUG environment variable.
+//
+// Before Go 1.23, ParseCertificate accepted certificates with serial numbers
+// longer than 20 octets. This behavior can be restored by including
+// "x509seriallength=1" in the GODEBUG environment variable.
 func ParseCertificate(der []byte) (*Certificate, error) {
 	cert, err := parseCertificate(der)
 	if err != nil {
@@ -1195,7 +1234,10 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 				return nil, err
 			}
 			if ext.Id.Equal(oidExtensionAuthorityKeyId) {
-				rl.AuthorityKeyId = ext.Value
+				rl.AuthorityKeyId, err = parseAuthorityKeyIdentifier(ext)
+				if err != nil {
+					return nil, err
+				}
 			} else if ext.Id.Equal(oidExtensionCRLNumber) {
 				value := cryptobyte.String(ext.Value)
 				rl.Number = new(big.Int)

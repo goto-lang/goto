@@ -83,6 +83,19 @@ func badsystemstack() {
 //
 // The (CPU-specific) implementations of this function are in memclr_*.s.
 //
+// memclrNoHeapPointers should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//   - github.com/chenzhuoyu/iasm
+//   - github.com/cloudwego/frugal
+//   - github.com/dgraph-io/ristretto
+//   - github.com/outcaste-io/ristretto
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname memclrNoHeapPointers
 //go:noescape
 func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
 
@@ -103,12 +116,24 @@ func reflect_memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
 //
 // Implementations are in memmove_*.s.
 //
-//go:noescape
-func memmove(to, from unsafe.Pointer, n uintptr)
-
-// Outside assembly calls memmove. Make sure it has ABI wrappers.
+// Outside assembly calls memmove.
+//
+// memmove should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//   - github.com/cloudwego/frugal
+//   - github.com/ebitengine/purego
+//   - github.com/tetratelabs/wazero
+//   - github.com/ugorji/go/codec
+//   - gvisor.dev/gvisor
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
 //
 //go:linkname memmove
+//go:noescape
+func memmove(to, from unsafe.Pointer, n uintptr)
 
 //go:linkname reflect_memmove reflect.memmove
 func reflect_memmove(to, from unsafe.Pointer, n uintptr) {
@@ -120,6 +145,15 @@ const hashLoad = float32(loadFactorNum) / float32(loadFactorDen)
 
 // in internal/bytealg/equal_*.s
 //
+// memequal should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname memequal
 //go:noescape
 func memequal(a, b unsafe.Pointer, size uintptr) bool
 
@@ -129,6 +163,17 @@ func memequal(a, b unsafe.Pointer, size uintptr) bool
 // compiles down to zero instructions.
 // USE CAREFULLY!
 //
+// noescape should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/gopkg
+//   - github.com/ebitengine/purego
+//   - github.com/puzpuzpuz/xsync/v3
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname noescape
 //go:nosplit
 func noescape(p unsafe.Pointer) unsafe.Pointer {
 	x := uintptr(p)
@@ -207,6 +252,15 @@ func breakpoint()
 //go:noescape
 func reflectcall(stackArgsType *_type, fn, stackArgs unsafe.Pointer, stackArgsSize, stackRetOffset, frameSize uint32, regArgs *abi.RegArgs)
 
+// procyield should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/slackhq/nebula
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname procyield
 func procyield(cycles uint32)
 
 type neverCallThisFunction struct{}
@@ -295,7 +349,18 @@ func getclosureptr() uintptr
 func asmcgocall(fn, arg unsafe.Pointer) int32
 
 func morestack()
+
+// morestack_noctxt should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/cloudwego/frugal
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname morestack_noctxt
 func morestack_noctxt()
+
 func rt0_go()
 
 // return0 is a stub used to return 0 from deferproc.
@@ -380,7 +445,19 @@ func abort()
 
 // Called from compiled code; declared for vet; do NOT call from Go.
 func gcWriteBarrier1()
+
+// gcWriteBarrier2 should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//   - github.com/cloudwego/frugal
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname gcWriteBarrier2
 func gcWriteBarrier2()
+
 func gcWriteBarrier3()
 func gcWriteBarrier4()
 func gcWriteBarrier5()

@@ -12,6 +12,7 @@ import (
 	"internal/buildcfg"
 	"internal/pkgbits"
 	"os"
+	"strings"
 
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/ir"
@@ -62,9 +63,10 @@ import (
 type pkgWriter struct {
 	pkgbits.PkgEncoder
 
-	m      posMap
-	curpkg *types2.Package
-	info   *types2.Info
+	m                     posMap
+	curpkg                *types2.Package
+	info                  *types2.Info
+	rangeFuncBodyClosures map[*syntax.FuncLit]bool // non-public information, e.g., which functions are closures range function bodies?
 
 	// Indices for previously written syntax and types2 things.
 
@@ -89,13 +91,14 @@ type pkgWriter struct {
 
 // newPkgWriter returns an initialized pkgWriter for the specified
 // package.
-func newPkgWriter(m posMap, pkg *types2.Package, info *types2.Info) *pkgWriter {
+func newPkgWriter(m posMap, pkg *types2.Package, info *types2.Info, otherInfo map[*syntax.FuncLit]bool) *pkgWriter {
 	return &pkgWriter{
 		PkgEncoder: pkgbits.NewPkgEncoder(base.Debug.SyncFrames),
 
-		m:      m,
-		curpkg: pkg,
-		info:   info,
+		m:                     m,
+		curpkg:                pkg,
+		info:                  info,
+		rangeFuncBodyClosures: otherInfo,
 
 		pkgsIdx: make(map[*types2.Package]pkgbits.Index),
 		objsIdx: make(map[types2.Object]pkgbits.Index),
@@ -488,6 +491,18 @@ func (w *writer) typInfo(info typeInfo) {
 // typIdx also reports whether typ is a derived type; that is, whether
 // its identity depends on type parameters.
 func (pw *pkgWriter) typIdx(typ types2.Type, dict *writerDict) typeInfo {
+	// Strip non-global aliases, because they only appear in inline
+	// bodies anyway. Otherwise, they can cause types.Sym collisions
+	// (e.g., "main.C" for both of the local type aliases in
+	// test/fixedbugs/issue50190.go).
+	for {
+		if alias, ok := typ.(*types2.Alias); ok && !isGlobal(alias.Obj()) {
+			typ = alias.Rhs()
+		} else {
+			break
+		}
+	}
+
 	if idx, ok := pw.typsIdx[typ]; ok {
 		return typeInfo{idx: idx, derived: false}
 	}
@@ -2323,6 +2338,7 @@ func (w *writer) funcLit(expr *syntax.FuncLit) {
 	w.Sync(pkgbits.SyncFuncLit)
 	w.pos(expr)
 	w.signature(sig)
+	w.Bool(w.p.rangeFuncBodyClosures[expr])
 
 	w.Len(len(closureVars))
 	for _, cv := range closureVars {
@@ -2596,6 +2612,10 @@ func (pw *pkgWriter) collectDecls(noders []*noder) {
 		for _, l := range p.linknames {
 			if !file.importedUnsafe {
 				pw.errorf(l.pos, "//go:linkname only allowed in Go files that import \"unsafe\"")
+				continue
+			}
+			if strings.Contains(l.remote, "[") && strings.Contains(l.remote, "]") {
+				pw.errorf(l.pos, "//go:linkname reference of an instantiation is not allowed")
 				continue
 			}
 

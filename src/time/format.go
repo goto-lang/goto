@@ -7,6 +7,7 @@ package time
 import (
 	"errors"
 	"internal/stringslite"
+	_ "unsafe" // for linkname
 )
 
 // These are predefined layouts for use in [Time.Format] and [time.Parse].
@@ -184,6 +185,16 @@ func startsWithLowerCase(str string) bool {
 
 // nextStdChunk finds the first occurrence of a std string in
 // layout and returns the text before, the std string, and the text after.
+//
+// nextStdChunk should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang/go
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname nextStdChunk
 func nextStdChunk(layout string) (prefix string, std int, suffix string) {
 	for i := 0; i < len(layout); i++ {
 		switch c := int(layout[i]); c {
@@ -1242,6 +1253,20 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			if err == nil {
 				ss, _, err = getnum(seconds, true)
 			}
+
+			// The range test use > rather than >=,
+			// as some people do write offsets of 24 hours
+			// or 60 minutes or 60 seconds.
+			if hr > 24 {
+				rangeErrString = "time zone offset hour"
+			}
+			if mm > 60 {
+				rangeErrString = "time zone offset minute"
+			}
+			if ss > 60 {
+				rangeErrString = "time zone offset second"
+			}
+
 			zoneOffset = (hr*60+mm)*60 + ss // offset is in seconds
 			switch sign[0] {
 			case '+':

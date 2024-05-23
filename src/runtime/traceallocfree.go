@@ -11,23 +11,43 @@ import (
 	"runtime/internal/sys"
 )
 
+// Batch type values for the alloc/free experiment.
+const (
+	traceAllocFreeTypesBatch = iota // Contains types. [{id, address, size, ptrspan, name length, name string} ...]
+	traceAllocFreeInfoBatch         // Contains info for interpreting events. [min heap addr, page size, min heap align, min stack align]
+)
+
 // traceSnapshotMemory takes a snapshot of all runtime memory that there are events for
 // (heap spans, heap objects, goroutine stacks, etc.) and writes out events for them.
 //
 // The world must be stopped and tracing must be enabled when this function is called.
-func traceSnapshotMemory() {
+func traceSnapshotMemory(gen uintptr) {
 	assertWorldStopped()
+
+	// Write a batch containing information that'll be necessary to
+	// interpret the events.
+	var flushed bool
+	w := unsafeTraceExpWriter(gen, nil, traceExperimentAllocFree)
+	w, flushed = w.ensure(1 + 4*traceBytesPerNumber)
+	if flushed {
+		// Annotate the batch as containing additional info.
+		w.byte(byte(traceAllocFreeInfoBatch))
+	}
+
+	// Emit info.
+	w.varint(uint64(trace.minPageHeapAddr))
+	w.varint(uint64(pageSize))
+	w.varint(uint64(minHeapAlign))
+	w.varint(uint64(fixedStack))
+
+	// Finish writing the batch.
+	w.flush().end()
 
 	// Start tracing.
 	trace := traceAcquire()
 	if !trace.ok() {
 		throw("traceSnapshotMemory: tracing is not enabled")
 	}
-
-	// Write out all the goroutine stacks.
-	forEachGRace(func(gp *g) {
-		trace.GoroutineStackExists(gp.stack.lo, gp.stack.hi-gp.stack.lo)
-	})
 
 	// Write out all the heap spans and heap objects.
 	for _, s := range mheap_.allspans {
@@ -45,14 +65,18 @@ func traceSnapshotMemory() {
 		// Find all allocated objects.
 		abits := s.allocBitsForIndex(0)
 		for i := uintptr(0); i < uintptr(s.nelems); i++ {
-			if !abits.isMarked() {
-				continue
+			if abits.index < uintptr(s.freeindex) || abits.isMarked() {
+				x := s.base() + i*s.elemsize
+				trace.HeapObjectExists(x, s.typePointersOfUnchecked(x).typ)
 			}
-			x := s.base() + i*s.elemsize
-			trace.HeapObjectExists(x, s.typePointersOfUnchecked(x).typ)
 			abits.advance()
 		}
 	}
+
+	// Write out all the goroutine stacks.
+	forEachGRace(func(gp *g) {
+		trace.GoroutineStackExists(gp.stack.lo, gp.stack.hi-gp.stack.lo)
+	})
 	traceRelease(trace)
 }
 
@@ -104,7 +128,7 @@ func (tl traceLocker) HeapObjectFree(addr uintptr) {
 
 // traceHeapObjectID creates a trace ID for a heap object at address addr.
 func traceHeapObjectID(addr uintptr) traceArg {
-	return traceArg(uint64(addr)-trace.minPageHeapAddr) / 8
+	return traceArg(uint64(addr)-trace.minPageHeapAddr) / minHeapAlign
 }
 
 // GoroutineStackExists records that a goroutine stack already exists at address base with the provided size.

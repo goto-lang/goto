@@ -34,6 +34,8 @@ import (
 	"cmd/go/internal/modget"
 	"cmd/go/internal/modload"
 	"cmd/go/internal/run"
+	"cmd/go/internal/telemetrycmd"
+	"cmd/go/internal/telemetrystats"
 	"cmd/go/internal/test"
 	"cmd/go/internal/tool"
 	"cmd/go/internal/toolchain"
@@ -61,6 +63,7 @@ func init() {
 		modcmd.CmdMod,
 		workcmd.CmdWork,
 		run.CmdRun,
+		telemetrycmd.CmdTelemetry,
 		test.CmdTest,
 		tool.CmdTool,
 		version.CmdVersion,
@@ -92,10 +95,11 @@ var counterErrorsGOPATHEntryRelative = telemetry.NewCounter("go/errors:gopath-en
 
 func main() {
 	log.SetFlags(0)
-	telemetry.StartWithUpload() // Open the telemetry counter file so counters can be written to it.
+	telemetry.Start() // Open the telemetry counter file so counters can be written to it.
 	handleChdirFlag()
 	toolchain.Select()
 
+	telemetry.StartWithUpload() // Run the upload process. Opening the counter file is idempotent.
 	flag.Usage = base.Usage
 	flag.Parse()
 	telemetry.Inc("go/invocations")
@@ -120,6 +124,20 @@ func main() {
 	if fi, err := os.Stat(cfg.GOROOT); err != nil || !fi.IsDir() {
 		fmt.Fprintf(os.Stderr, "go: cannot find GOROOT directory: %v\n", cfg.GOROOT)
 		os.Exit(2)
+	}
+	switch strings.ToLower(cfg.GOROOT) {
+	case "/usr/local/go": // Location recommended for installation on Linux and Darwin and used by Mac installer.
+		telemetry.Inc("go/goroot:usr-local-go")
+	case "/usr/lib/go": // A typical location used by Linux package managers.
+		telemetry.Inc("go/goroot:usr-lib-go")
+	case "/usr/lib/golang": // Another typical location used by Linux package managers.
+		telemetry.Inc("go/goroot:usr-lib-golang")
+	case `c:\program files\go`: // Location used by Windows installer.
+		telemetry.Inc("go/goroot:program-files-go")
+	case `c:\program files (x86)\go`: // Location used by 386 Windows installer on amd64 platform.
+		telemetry.Inc("go/goroot:program-files-x86-go")
+	default:
+		telemetry.Inc("go/goroot:other")
 	}
 
 	// Diagnose common mistake: GOPATH==GOROOT.
@@ -189,6 +207,7 @@ func main() {
 	if cfg.CmdName != "tool" {
 		telemetry.Inc("go/subcommand:" + strings.ReplaceAll(cfg.CmdName, " ", "-"))
 	}
+	telemetrystats.Increment()
 	invoke(cmd, args[used-1:])
 	base.Exit()
 }
