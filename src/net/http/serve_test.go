@@ -613,6 +613,22 @@ func TestMuxNoSlashRedirectWithTrailingSlash(t *testing.T) {
 	}
 }
 
+// Test that we don't attempt trailing-slash response 405 on a path that already has
+// a trailing slash.
+// See issue #67657.
+func TestMuxNoSlash405WithTrailingSlash(t *testing.T) {
+	mux := NewServeMux()
+	mux.HandleFunc("GET /{x}/", func(w ResponseWriter, r *Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	w := httptest.NewRecorder()
+	req, _ := NewRequest("GET", "/", nil)
+	mux.ServeHTTP(w, req)
+	if g, w := w.Code, 404; g != w {
+		t.Errorf("got %d, want %d", g, w)
+	}
+}
+
 func TestShouldRedirectConcurrency(t *testing.T) { run(t, testShouldRedirectConcurrency) }
 func testShouldRedirectConcurrency(t *testing.T, mode testMode) {
 	mux := NewServeMux()
@@ -1744,6 +1760,24 @@ func TestAutomaticHTTP2_ListenAndServe_GetCertificate(t *testing.T) {
 	testAutomaticHTTP2_ListenAndServe(t, &tls.Config{
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return &cert, nil
+		},
+	})
+}
+
+func TestAutomaticHTTP2_ListenAndServe_GetConfigForClient(t *testing.T) {
+	cert, err := tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &tls.Config{
+		// GetConfigForClient requires specifying a full tls.Config so we must set
+		// NextProtos ourselves.
+		NextProtos:   []string{"h2"},
+		Certificates: []tls.Certificate{cert},
+	}
+	testAutomaticHTTP2_ListenAndServe(t, &tls.Config{
+		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
+			return conf, nil
 		},
 	})
 }
@@ -7148,13 +7182,12 @@ func testErrorContentLength(t *testing.T, mode testMode) {
 func TestError(t *testing.T) {
 	w := httptest.NewRecorder()
 	w.Header().Set("Content-Length", "1")
-	w.Header().Set("Content-Encoding", "ascii")
 	w.Header().Set("X-Content-Type-Options", "scratch and sniff")
 	w.Header().Set("Other", "foo")
 	Error(w, "oops", 432)
 
 	h := w.Header()
-	for _, hdr := range []string{"Content-Length", "Content-Encoding"} {
+	for _, hdr := range []string{"Content-Length"} {
 		if v, ok := h[hdr]; ok {
 			t.Errorf("%s: %q, want not present", hdr, v)
 		}

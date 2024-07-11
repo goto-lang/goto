@@ -276,7 +276,7 @@
 //
 // Usage:
 //
-//	go clean [clean flags] [build flags] [packages]
+//	go clean [-i] [-r] [-cache] [-testcache] [-modcache] [-fuzzcache] [build flags] [packages]
 //
 // Clean removes object files from package source directories.
 // The go command builds most objects in a temporary directory,
@@ -720,6 +720,8 @@
 // The -x flag prints commands as they are executed. This is useful for
 // debugging version control commands when a module is downloaded directly
 // from a repository.
+//
+// For more about build flags, see 'go help build'.
 //
 // For more about modules, see https://golang.org/ref/mod.
 //
@@ -1367,9 +1369,9 @@
 // The -e flag causes tidy to attempt to proceed despite errors
 // encountered while loading packages.
 //
-// The -diff flag causes tidy not to modify the files but instead print the
-// necessary changes as a unified diff. It exits with a non-zero code
-// if updates are needed.
+// The -diff flag causes tidy not to modify go.mod or go.sum but
+// instead print the necessary changes as a unified diff. It exits
+// with a non-zero code if the diff is not empty.
 //
 // The -go flag causes tidy to update the 'go' directive in the go.mod
 // file to the given version, which may change which module dependencies
@@ -1687,8 +1689,7 @@
 //
 // The -r flag searches recursively for modules in the argument
 // directories, and the use command operates as if each of the directories
-// were specified as arguments: namely, use directives will be added for
-// directories that exist, and removed for directories that do not exist.
+// were specified as arguments.
 //
 // See the workspaces reference at https://go.dev/ref/mod#workspaces
 // for more information.
@@ -1992,6 +1993,9 @@
 //
 //	//go:build
 //
+// Build constraints can also be used to downgrade the language version
+// used to compile a file.
+//
 // Constraints may appear in any kind of source file (not just Go), but
 // they must appear near the top of the file, preceded
 // only by blank lines and other comments. These rules mean that in Go
@@ -2113,6 +2117,10 @@
 // Go versions 1.16 and earlier used a different syntax for build constraints,
 // with a "// +build" prefix. The gofmt command will add an equivalent //go:build
 // constraint when encountering the older syntax.
+//
+// In modules with a Go version of 1.21 or later, if a file's build constraint
+// has a term for a Go major release, the language version used when compiling
+// the file will be the minimum version implied by the build constraint.
 //
 // # Build modes
 //
@@ -2386,7 +2394,7 @@
 //	GORISCV64
 //		For GOARCH=riscv64, the RISC-V user-mode application profile for which
 //		to compile. Valid values are rva20u64 (default), rva22u64.
-//		See https://github.com/riscv/riscv-profiles/blob/main/profiles.adoc
+//		See https://github.com/riscv/riscv-profiles/blob/main/src/profiles.adoc
 //	GOWASM
 //		For GOARCH=wasm, comma-separated list of experimental WebAssembly features to use.
 //		Valid values are satconv, signext.

@@ -166,6 +166,12 @@ import (
 // holds a lock for 1s while 5 other goroutines are waiting for the entire
 // second to acquire the lock, its unlock call stack will report 5s of
 // contention.
+//
+// Runtime-internal locks are always reported at the location
+// "runtime._LostContendedRuntimeLock". More detailed stack traces for
+// runtime-internal locks can be obtained by setting
+// `GODEBUG=runtimecontentionstacks=1` (see package [runtime] docs for
+// caveats).
 type Profile struct {
 	name  string
 	mu    sync.Mutex
@@ -398,6 +404,25 @@ type countProfile interface {
 	Label(i int) *labelMap
 }
 
+// expandInlinedFrames copies the call stack from pcs into dst, expanding any
+// PCs corresponding to inlined calls into the corresponding PCs for the inlined
+// functions. Returns the number of frames copied to dst.
+func expandInlinedFrames(dst, pcs []uintptr) int {
+	cf := runtime.CallersFrames(pcs)
+	var n int
+	for n < len(dst) {
+		f, more := cf.Next()
+		// f.PC is a "call PC", but later consumers will expect
+		// "return PCs"
+		dst[n] = f.PC + 1
+		n++
+		if !more {
+			break
+		}
+	}
+	return n
+}
+
 // printCountCycleProfile outputs block profile records (for block or mutex profiles)
 // as the pprof-proto format output. Translations from cycle count to time duration
 // are done because The proto expects count and time (nanoseconds) instead of count
@@ -420,7 +445,7 @@ func printCountCycleProfile(w io.Writer, countName, cycleName string, records []
 		values[1] = int64(float64(r.Cycles) / cpuGHz)
 		// For count profiles, all stack addresses are
 		// return PCs, which is what appendLocsForStack expects.
-		n := pprof_fpunwindExpand(expandedStack[:], r.Stack)
+		n := expandInlinedFrames(expandedStack, r.Stack)
 		locs = b.appendLocsForStack(locs[:0], expandedStack[:n])
 		b.pbSample(values, locs, nil)
 	}
@@ -580,7 +605,8 @@ func writeHeapInternal(w io.Writer, debug int, defaultSampleType string) error {
 		runtime.ReadMemStats(memStats)
 	}
 
-	// Find out how many records there are (MemProfile(nil, true)),
+	// Find out how many records there are (the call
+	// pprof_memProfileInternal(nil, true) below),
 	// allocate that many records, and get the data.
 	// There's a race—more records might be added between
 	// the two calls—so allocate a few extra records for safety
@@ -928,7 +954,7 @@ func writeProfileInternal(w io.Writer, debug int, name string, runtimeProfile fu
 	for i := range p {
 		r := &p[i]
 		fmt.Fprintf(w, "%v %v @", r.Cycles, r.Count)
-		n := pprof_fpunwindExpand(expandedStack, r.Stack)
+		n := expandInlinedFrames(expandedStack, r.Stack)
 		stack := expandedStack[:n]
 		for _, pc := range stack {
 			fmt.Fprintf(w, " %#x", pc)
@@ -948,7 +974,7 @@ func writeProfileInternal(w io.Writer, debug int, name string, runtimeProfile fu
 //go:linkname pprof_goroutineProfileWithLabels runtime.pprof_goroutineProfileWithLabels
 func pprof_goroutineProfileWithLabels(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool)
 
-//go:linkname pprof_cyclesPerSecond runtime.pprof_cyclesPerSecond
+//go:linkname pprof_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond
 func pprof_cyclesPerSecond() int64
 
 //go:linkname pprof_memProfileInternal runtime.pprof_memProfileInternal

@@ -579,6 +579,16 @@ func (t Time) Clock() (hour, min, sec int) {
 }
 
 // absClock is like clock but operates on an absolute time.
+//
+// absClock should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/phuslu/log
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname absClock
 func absClock(abs uint64) (hour, min, sec int) {
 	sec = int(abs % secondsPerDay)
 	hour = sec / secondsPerHour
@@ -992,6 +1002,7 @@ func (t Time) date(full bool) (year int, month Month, day int, yday int) {
 // absDate should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
+//   - github.com/phuslu/log
 //   - gitee.com/quant1x/gox
 //
 // Do not remove or change the type signature.
@@ -1140,6 +1151,9 @@ func runtimeNano() int64
 // we avoid ever reporting a monotonic time of 0.
 // (Callers may want to use 0 as "time not set".)
 var startNano int64 = runtimeNano() - 1
+
+// x/tools uses a linkname of time.Now in its tests. No harm done.
+//go:linkname Now
 
 // Now returns the current local time.
 func Now() Time {

@@ -32,6 +32,10 @@ import (
 // only to local times. Applying them to UTC times will use "UTC" as the
 // time zone abbreviation, while strictly speaking those RFCs require the
 // use of "GMT" in that case.
+// When using the [RFC1123] or [RFC1123Z] formats for parsing, note that these
+// formats define a leading zero for the day-in-month portion, which is not
+// strictly allowed by RFC 1123. This will result in an error when parsing
+// date strings that occur in the first 9 days of a given month.
 // In general [RFC1123Z] should be used instead of [RFC1123] for servers
 // that insist on that format, and [RFC3339] should be preferred for new protocols.
 // [RFC3339], [RFC822], [RFC822Z], [RFC1123], and [RFC1123Z] are useful for formatting;
@@ -1199,12 +1203,14 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			default:
 				err = errBad
 			}
-		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ShortTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumShortTZ, stdNumColonTZ, stdNumSecondsTz, stdNumColonSecondsTZ:
-			if (std == stdISO8601TZ || std == stdISO8601ShortTZ || std == stdISO8601ColonTZ) && len(value) >= 1 && value[0] == 'Z' {
+		case stdISO8601TZ, stdISO8601ShortTZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ColonSecondsTZ:
+			if len(value) >= 1 && value[0] == 'Z' {
 				value = value[1:]
 				z = UTC
 				break
 			}
+			fallthrough
+		case stdNumTZ, stdNumShortTZ, stdNumColonTZ, stdNumSecondsTz, stdNumColonSecondsTZ:
 			var sign, hour, min, seconds string
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ {
 				if len(value) < 6 {

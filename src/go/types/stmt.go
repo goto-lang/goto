@@ -65,7 +65,7 @@ func (check *Checker) usage(scope *Scope) {
 		return cmpPos(unused[i].pos, unused[j].pos) < 0
 	})
 	for _, v := range unused {
-		check.softErrorf(v, UnusedVar, "%s declared and not used", quote(v.name))
+		check.softErrorf(v, UnusedVar, "declared and not used: %s", v.name)
 	}
 
 	for _, scope := range scope.children {
@@ -279,7 +279,11 @@ func (check *Checker) isNil(e ast.Expr) bool {
 	return false
 }
 
-// If the type switch expression is invalid, x is nil.
+// caseTypes typechecks the type expressions of a type case, checks for duplicate types
+// using the seen map, and verifies that each type is valid with respect to the type of
+// the operand x in the type switch clause. If the type switch expression is invalid, x
+// must be nil. The result is the type of the last type expression; it is nil if the
+// expression denotes the predeclared nil.
 func (check *Checker) caseTypes(x *operand, types []ast.Expr, seen map[Type]ast.Expr) (T Type) {
 	var dummy operand
 L:
@@ -515,7 +519,7 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 			for _, obj := range res.vars {
 				if alt := check.lookup(obj.name); alt != nil && alt != obj {
 					err := check.newError(OutOfScopeResult)
-					err.addf(s, "result parameter %s not in scope at return", quote(obj.name))
+					err.addf(s, "result parameter %s not in scope at return", obj.name)
 					err.addf(alt, "inner declaration of %s", obj)
 					err.report()
 					// ok to continue
@@ -687,20 +691,19 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 			check.error(s, InvalidSyntaxTree, "incorrect form of type switch guard")
 			return
 		}
-		var x operand
-		check.expr(nil, &x, expr.X)
-		if x.mode == invalid {
-			return
-		}
-		// TODO(gri) we may want to permit type switches on type parameter values at some point
+
 		var sx *operand // switch expression against which cases are compared against; nil if invalid
-		if isTypeParam(x.typ) {
-			check.errorf(&x, InvalidTypeSwitch, "cannot use type switch on type parameter value %s", &x)
-		} else {
-			if _, ok := under(x.typ).(*Interface); ok {
-				sx = &x
-			} else {
-				check.errorf(&x, InvalidTypeSwitch, "%s is not an interface", &x)
+		{
+			var x operand
+			check.expr(nil, &x, expr.X)
+			if x.mode != invalid {
+				if isTypeParam(x.typ) {
+					check.errorf(&x, InvalidTypeSwitch, "cannot use type switch on type parameter value %s", &x)
+				} else if IsInterface(x.typ) {
+					sx = &x
+				} else {
+					check.errorf(&x, InvalidTypeSwitch, "%s is not an interface", &x)
+				}
 			}
 		}
 
@@ -725,7 +728,10 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 				// exactly one type, the variable has that type; otherwise, the variable
 				// has the type of the expression in the TypeSwitchGuard."
 				if len(clause.List) != 1 || T == nil {
-					T = x.typ
+					T = Typ[Invalid]
+					if sx != nil {
+						T = sx.typ
+					}
 				}
 				obj := NewVar(lhs.Pos(), check.pkg, lhs.Name, T)
 				scopePos := clause.Pos() + token.Pos(len("default")) // for default clause (len(List) == 0)
@@ -857,7 +863,7 @@ func (check *Checker) rangeStmt(inner stmtContext, s *ast.RangeStmt) {
 	var key, val Type
 	if x.mode != invalid {
 		// Ranging over a type parameter is permitted if it has a core type.
-		k, v, cause, isFunc, ok := rangeKeyVal(x.typ, func(v goVersion) bool {
+		k, v, cause, ok := rangeKeyVal(x.typ, func(v goVersion) bool {
 			return check.allowVersion(x.expr, v)
 		})
 		switch {
@@ -871,17 +877,6 @@ func (check *Checker) rangeStmt(inner stmtContext, s *ast.RangeStmt) {
 			check.softErrorf(sValue, InvalidIterVar, "range over %s permits only one iteration variable", &x)
 		case sExtra != nil:
 			check.softErrorf(sExtra, InvalidIterVar, "range clause permits at most two iteration variables")
-		case isFunc && ((k == nil) != (sKey == nil) || (v == nil) != (sValue == nil)):
-			var count string
-			switch {
-			case k == nil:
-				count = "no iteration variables"
-			case v == nil:
-				count = "one iteration variable"
-			default:
-				count = "two iteration variables"
-			}
-			check.softErrorf(&x, InvalidIterVar, "range over %s must have %s", &x, count)
 		}
 		key, val = k, v
 	}
@@ -1003,9 +998,9 @@ func (check *Checker) rangeStmt(inner stmtContext, s *ast.RangeStmt) {
 // If allowVersion != nil, it is used to check the required language version.
 // If the range clause is not permitted, rangeKeyVal returns ok = false.
 // When ok = false, rangeKeyVal may also return a reason in cause.
-func rangeKeyVal(typ Type, allowVersion func(goVersion) bool) (key, val Type, cause string, isFunc, ok bool) {
-	bad := func(cause string) (Type, Type, string, bool, bool) {
-		return Typ[Invalid], Typ[Invalid], cause, false, false
+func rangeKeyVal(typ Type, allowVersion func(goVersion) bool) (key, val Type, cause string, ok bool) {
+	bad := func(cause string) (Type, Type, string, bool) {
+		return Typ[Invalid], Typ[Invalid], cause, false
 	}
 	toSig := func(t Type) *Signature {
 		sig, _ := coreType(t).(*Signature)
@@ -1018,26 +1013,25 @@ func rangeKeyVal(typ Type, allowVersion func(goVersion) bool) (key, val Type, ca
 		return bad("no core type")
 	case *Basic:
 		if isString(typ) {
-			return Typ[Int], universeRune, "", false, true // use 'rune' name
+			return Typ[Int], universeRune, "", true // use 'rune' name
 		}
 		if isInteger(typ) {
-			// untyped numeric constants may be representable as integer values
 			if allowVersion != nil && !allowVersion(go1_22) {
 				return bad("requires go1.22 or later")
 			}
-			return orig, nil, "", false, true
+			return orig, nil, "", true
 		}
 	case *Array:
-		return Typ[Int], typ.elem, "", false, true
+		return Typ[Int], typ.elem, "", true
 	case *Slice:
-		return Typ[Int], typ.elem, "", false, true
+		return Typ[Int], typ.elem, "", true
 	case *Map:
-		return typ.key, typ.elem, "", false, true
+		return typ.key, typ.elem, "", true
 	case *Chan:
 		if typ.dir == SendOnly {
 			return bad("receive from send-only channel")
 		}
-		return typ.elem, nil, "", false, true
+		return typ.elem, nil, "", true
 	case *Signature:
 		if !buildcfg.Experiment.RangeFunc && allowVersion != nil && !allowVersion(go1_23) {
 			return bad("requires go1.23 or later")
@@ -1065,7 +1059,7 @@ func rangeKeyVal(typ Type, allowVersion func(goVersion) bool) (key, val Type, ca
 		if cb.Params().Len() >= 2 {
 			val = cb.Params().At(1).Type()
 		}
-		return key, val, "", true, true
+		return key, val, "", true
 	}
 	return
 }

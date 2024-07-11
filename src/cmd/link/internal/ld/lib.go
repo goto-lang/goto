@@ -892,9 +892,9 @@ func (ctxt *Link) linksetup() {
 		}
 
 		// Set runtime.disableMemoryProfiling bool if
-		// runtime.MemProfile is not retained in the binary after
+		// runtime.memProfileInternal is not retained in the binary after
 		// deadcode (and we're not dynamically linking).
-		memProfile := ctxt.loader.Lookup("runtime.MemProfile", abiInternalVer)
+		memProfile := ctxt.loader.Lookup("runtime.memProfileInternal", abiInternalVer)
 		if memProfile != 0 && !ctxt.loader.AttrReachable(memProfile) && !ctxt.DynlinkingGo() {
 			memProfSym := ctxt.loader.LookupOrCreateSym("runtime.disableMemoryProfiling", 0)
 			sb := ctxt.loader.MakeSymbolUpdater(memProfSym)
@@ -1367,7 +1367,12 @@ func (ctxt *Link) archive() {
 	exitIfErrors()
 
 	if *flagExtar == "" {
+		const printProgName = "--print-prog-name=ar"
+		cc := ctxt.extld()
 		*flagExtar = "ar"
+		if linkerFlagSupported(ctxt.Arch, cc[0], "", printProgName) {
+			*flagExtar = ctxt.findExtLinkTool("ar")
+		}
 	}
 
 	mayberemoveoutfile()
@@ -1997,28 +2002,22 @@ func (ctxt *Link) hostlink() {
 	uuidUpdated := false
 	if combineDwarf {
 		// Find "dsymutils" and "strip" tools using CC --print-prog-name.
-		var cc []string
-		cc = append(cc, ctxt.extld()...)
-		cc = append(cc, hostlinkArchArgs(ctxt.Arch)...)
-		cc = append(cc, "--print-prog-name", "dsymutil")
-		out, err := exec.Command(cc[0], cc[1:]...).CombinedOutput()
-		if err != nil {
-			Exitf("%s: finding dsymutil failed: %v\n%s", os.Args[0], err, out)
-		}
-		dsymutilCmd := strings.TrimSuffix(string(out), "\n")
-
-		cc[len(cc)-1] = "strip"
-		out, err = exec.Command(cc[0], cc[1:]...).CombinedOutput()
-		if err != nil {
-			Exitf("%s: finding strip failed: %v\n%s", os.Args[0], err, out)
-		}
-		stripCmd := strings.TrimSuffix(string(out), "\n")
+		dsymutilCmd := ctxt.findExtLinkTool("dsymutil")
+		stripCmd := ctxt.findExtLinkTool("strip")
 
 		dsym := filepath.Join(*flagTmpdir, "go.dwarf")
 		cmd := exec.Command(dsymutilCmd, "-f", *flagOutfile, "-o", dsym)
 		// dsymutil may not clean up its temp directory at exit.
 		// Set DSYMUTIL_REPRODUCER_PATH to work around. see issue 59026.
-		cmd.Env = append(os.Environ(), "DSYMUTIL_REPRODUCER_PATH="+*flagTmpdir)
+		// dsymutil (Apple LLVM version 16.0.0) deletes the directory
+		// even if it is not empty. We still need our tmpdir, so give a
+		// subdirectory to dsymutil.
+		dsymDir := filepath.Join(*flagTmpdir, "dsymutil")
+		err := os.MkdirAll(dsymDir, 0777)
+		if err != nil {
+			Exitf("fail to create temp dir: %v", err)
+		}
+		cmd.Env = append(os.Environ(), "DSYMUTIL_REPRODUCER_PATH="+dsymDir)
 		if ctxt.Debugvlog != 0 {
 			ctxt.Logf("host link dsymutil:")
 			for _, v := range cmd.Args {
@@ -2051,14 +2050,13 @@ func (ctxt *Link) hostlink() {
 			Exitf("%s: running strip failed: %v\n%s\n%s", os.Args[0], err, cmd, out)
 		}
 		// Skip combining if `dsymutil` didn't generate a file. See #11994.
-		if _, err := os.Stat(dsym); os.IsNotExist(err) {
-			return
+		if _, err := os.Stat(dsym); err == nil {
+			updateMachoOutFile("combining dwarf",
+				func(ctxt *Link, exef *os.File, exem *macho.File, outexe string) error {
+					return machoCombineDwarf(ctxt, exef, exem, dsym, outexe)
+				})
+			uuidUpdated = true
 		}
-		updateMachoOutFile("combining dwarf",
-			func(ctxt *Link, exef *os.File, exem *macho.File, outexe string) error {
-				return machoCombineDwarf(ctxt, exef, exem, dsym, outexe)
-			})
-		uuidUpdated = true
 	}
 	if ctxt.IsDarwin() && !uuidUpdated && *flagBuildid != "" {
 		updateMachoOutFile("rewriting uuid",
@@ -2912,4 +2910,20 @@ func captureHostObj(h *Hostobj) {
 
 	fmt.Fprintf(os.Stderr, "link: info: captured host object %s to %s\n",
 		h.file, opath)
+}
+
+// findExtLinkTool invokes the external linker CC with --print-prog-name
+// passing the name of the tool we're interested in, such as "strip",
+// "ar", or "dsymutil", and returns the path passed back from the command.
+func (ctxt *Link) findExtLinkTool(toolname string) string {
+	var cc []string
+	cc = append(cc, ctxt.extld()...)
+	cc = append(cc, hostlinkArchArgs(ctxt.Arch)...)
+	cc = append(cc, "--print-prog-name", toolname)
+	out, err := exec.Command(cc[0], cc[1:]...).CombinedOutput()
+	if err != nil {
+		Exitf("%s: finding %s failed: %v\n%s", os.Args[0], toolname, err, out)
+	}
+	cmdpath := strings.TrimRight(string(out), "\r\n")
+	return cmdpath
 }

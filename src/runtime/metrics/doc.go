@@ -230,6 +230,10 @@ Below is the full list of supported metrics, ordered lexicographically.
 	/gc/stack/starting-size:bytes
 		The stack size of new goroutines.
 
+	/godebug/non-default-behavior/asynctimerchan:events
+		The number of non-default behaviors executed by the time package
+		due to a non-default GODEBUG=asynctimerchan=... setting.
+
 	/godebug/non-default-behavior/execerrdot:events
 		The number of non-default behaviors executed by the os/exec
 		package due to a non-default GODEBUG=execerrdot=... setting.
@@ -267,6 +271,11 @@ Below is the full list of supported metrics, ordered lexicographically.
 		The number of non-default behaviors executed by the net/http
 		package due to a non-default GODEBUG=httpmuxgo121=... setting.
 
+	/godebug/non-default-behavior/httpservecontentkeepheaders:events
+		The number of non-default behaviors executed
+		by the net/http package due to a non-default
+		GODEBUG=httpservecontentkeepheaders=... setting.
+
 	/godebug/non-default-behavior/installgoroot:events
 		The number of non-default behaviors executed by the go/build
 		package due to a non-default GODEBUG=installgoroot=... setting.
@@ -284,6 +293,10 @@ Below is the full list of supported metrics, ordered lexicographically.
 	/godebug/non-default-behavior/multipathtcp:events
 		The number of non-default behaviors executed by the net package
 		due to a non-default GODEBUG=multipathtcp=... setting.
+
+	/godebug/non-default-behavior/netedns0:events
+		The number of non-default behaviors executed by the net package
+		due to a non-default GODEBUG=netedns0=... setting.
 
 	/godebug/non-default-behavior/panicnil:events
 		The number of non-default behaviors executed by the runtime
@@ -334,11 +347,6 @@ Below is the full list of supported metrics, ordered lexicographically.
 	/godebug/non-default-behavior/x509negativeserial:events
 		The number of non-default behaviors executed by the crypto/x509
 		package due to a non-default GODEBUG=x509negativeserial=...
-		setting.
-
-	/godebug/non-default-behavior/x509seriallength:events
-		The number of non-default behaviors executed by the crypto/x509
-		package due to a non-default GODEBUG=x509seriallength=...
 		setting.
 
 	/godebug/non-default-behavior/x509sha1:events

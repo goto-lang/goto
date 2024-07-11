@@ -313,7 +313,9 @@ func readFile(f *file) (*File, error) {
 		return nil, fmt.Errorf("counter is not initialized - was Open called?")
 	}
 
-	f.rotate()
+	// Note: don't call f.rotate here as this will enqueue a follow-up rotation.
+	f.rotate1()
+
 	if f.err != nil {
 		return nil, fmt.Errorf("failed to rotate mapped file - %v", f.err)
 	}

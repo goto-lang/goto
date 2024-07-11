@@ -319,6 +319,7 @@ var debug struct {
 	gctrace                  int32
 	invalidptr               int32
 	madvdontneed             int32 // for Linux; issue 28466
+	runtimeContentionStacks  atomic.Int32
 	scavtrace                int32
 	scheddetail              int32
 	schedtrace               int32
@@ -380,6 +381,7 @@ var dbgvars = []*dbgVar{
 	{name: "madvdontneed", value: &debug.madvdontneed},
 	{name: "panicnil", atomic: &debug.panicnil},
 	{name: "profstackdepth", value: &debug.profstackdepth, def: 128},
+	{name: "runtimecontentionstacks", atomic: &debug.runtimeContentionStacks},
 	{name: "sbrk", value: &debug.sbrk},
 	{name: "scavtrace", value: &debug.scavtrace},
 	{name: "scheddetail", value: &debug.scheddetail},
@@ -621,6 +623,9 @@ func releasem(mp *m) {
 //   - github.com/goccy/json
 //   - github.com/modern-go/reflect2
 //   - github.com/vmware/govmomi
+//   - github.com/pinpoint-apm/pinpoint-go-agent
+//   - github.com/timandy/routine
+//   - github.com/v2pro/plz
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
@@ -659,6 +664,8 @@ func reflect_resolveNameOff(ptrInModule unsafe.Pointer, off int32) unsafe.Pointe
 // Notable members of the hall of shame include:
 //   - gitee.com/quant1x/gox
 //   - github.com/modern-go/reflect2
+//   - github.com/v2pro/plz
+//   - github.com/timandy/routine
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.

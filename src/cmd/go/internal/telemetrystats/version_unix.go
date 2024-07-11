@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"strings"
 
-	"cmd/internal/telemetry"
+	"cmd/internal/telemetry/counter"
 
 	"golang.org/x/sys/unix"
 )
@@ -29,19 +29,19 @@ func incrementVersionCounters() {
 	var v unix.Utsname
 	err := unix.Uname(&v)
 	if err != nil {
-		telemetry.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-uname-error", runtime.GOOS))
+		counter.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-uname-error", runtime.GOOS))
 		return
 	}
 	major, minor, ok := majorMinor(convert(v.Release[:]))
 	if runtime.GOOS == "aix" {
-		major, minor, ok = convert(v.Version[:]), convert(v.Release[:]), ok
+		major, minor, ok = convert(v.Version[:]), convert(v.Release[:]), true
 	}
 	if !ok {
-		telemetry.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-bad-format", runtime.GOOS))
+		counter.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-bad-format", runtime.GOOS))
 		return
 	}
-	telemetry.Inc(fmt.Sprintf("go/platform/host/%s/major-version:%s", runtime.GOOS, major))
-	telemetry.Inc(fmt.Sprintf("go/platform/host/%s/version:%s-%s", runtime.GOOS, major, minor))
+	counter.Inc(fmt.Sprintf("go/platform/host/%s/major-version:%s", runtime.GOOS, major))
+	counter.Inc(fmt.Sprintf("go/platform/host/%s/version:%s-%s", runtime.GOOS, major, minor))
 }
 
 func majorMinor(v string) (string, string, bool) {

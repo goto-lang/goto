@@ -52,62 +52,21 @@ func lock2(l *mutex) {
 	}
 	semacreate(gp.m)
 
-	// If a goroutine's stack needed to grow during a lock2 call, the M could
-	// end up with two active lock2 calls (one each on curg and g0). If both are
-	// contended, the call on g0 will corrupt mWaitList. Disable stack growth.
-	stackguard0, throwsplit := gp.stackguard0, gp.throwsplit
-	if gp == gp.m.curg {
-		gp.stackguard0, gp.throwsplit = stackPreempt, true
-	}
-
-	var startNanos int64
-	const sampleRate = gTrackingPeriod
-	sample := cheaprandn(sampleRate) == 0
-	if sample {
-		startNanos = nanotime()
-	}
-	gp.m.mWaitList.acquireTicks = cputicks()
-
+	timer := &lockTimer{lock: l}
+	timer.begin()
 	// On uniprocessor's, no point spinning.
 	// On multiprocessors, spin for ACTIVE_SPIN attempts.
 	spin := 0
 	if ncpu > 1 {
 		spin = active_spin
 	}
-	var enqueued bool
 Loop:
 	for i := 0; ; i++ {
 		v := atomic.Loaduintptr(&l.key)
 		if v&locked == 0 {
 			// Unlocked. Try to lock.
 			if atomic.Casuintptr(&l.key, v, v|locked) {
-				// We now own the mutex
-				v = v | locked
-				for {
-					old := v
-
-					head := muintptr(v &^ locked)
-					fixMutexWaitList(head)
-					if enqueued {
-						head = removeMutexWaitList(head, gp.m)
-					}
-					v = locked | uintptr(head)
-
-					if v == old || atomic.Casuintptr(&l.key, old, v) {
-						gp.m.mWaitList.clearLinks()
-						gp.m.mWaitList.acquireTicks = 0
-						break
-					}
-					v = atomic.Loaduintptr(&l.key)
-				}
-				if gp == gp.m.curg {
-					gp.stackguard0, gp.throwsplit = stackguard0, throwsplit
-				}
-
-				if sample {
-					endNanos := nanotime()
-					gp.m.mLockProfile.waitTime.Add((endNanos - startNanos) * sampleRate)
-				}
+				timer.end()
 				return
 			}
 			i = 0
@@ -118,33 +77,24 @@ Loop:
 			osyield()
 		} else {
 			// Someone else has it.
-			// l.key points to a linked list of M's waiting
-			// for this lock, chained through m.mWaitList.next.
+			// l->waitm points to a linked list of M's waiting
+			// for this lock, chained through m->nextwaitm.
 			// Queue this M.
 			for {
-				if !enqueued {
-					gp.m.mWaitList.next = muintptr(v &^ locked)
-					if atomic.Casuintptr(&l.key, v, uintptr(unsafe.Pointer(gp.m))|locked) {
-						enqueued = true
-						break
-					}
-					gp.m.mWaitList.next = 0
+				gp.m.nextwaitm = muintptr(v &^ locked)
+				if atomic.Casuintptr(&l.key, v, uintptr(unsafe.Pointer(gp.m))|locked) {
+					break
 				}
-
 				v = atomic.Loaduintptr(&l.key)
 				if v&locked == 0 {
 					continue Loop
 				}
 			}
-			// Queued. Wait.
-			semasleep(-1)
-			i = 0
-			enqueued = false
-			// unlock2 removed this M from the list (it was at the head). We
-			// need to erase the metadata about its former position in the
-			// list -- and since it's no longer a published member we can do
-			// so without races.
-			gp.m.mWaitList.clearLinks()
+			if v&locked != 0 {
+				// Queued. Wait.
+				semasleep(-1)
+				i = 0
+			}
 		}
 	}
 }
@@ -157,8 +107,6 @@ func unlock(l *mutex) {
 //
 //go:nowritebarrier
 func unlock2(l *mutex) {
-	var claimed bool
-	var cycles int64
 	gp := getg()
 	var mp *m
 	for {
@@ -168,25 +116,17 @@ func unlock2(l *mutex) {
 				break
 			}
 		} else {
-			if !claimed {
-				claimed = true
-				nowTicks := cputicks()
-				head := muintptr(v &^ locked)
-				cycles = claimMutexWaitTime(nowTicks, head)
-			}
-
 			// Other M's are waiting for the lock.
 			// Dequeue an M.
 			mp = muintptr(v &^ locked).ptr()
-			if atomic.Casuintptr(&l.key, v, uintptr(mp.mWaitList.next)) {
+			if atomic.Casuintptr(&l.key, v, uintptr(mp.nextwaitm)) {
 				// Dequeued an M.  Wake it.
 				semawakeup(mp)
 				break
 			}
 		}
 	}
-
-	gp.m.mLockProfile.recordUnlock(cycles)
+	gp.m.mLockProfile.recordUnlock(l)
 	gp.m.locks--
 	if gp.m.locks < 0 {
 		throw("runtime·unlock: lock count")
@@ -260,7 +200,7 @@ func notetsleep_internal(n *note, ns int64, gp *g, deadline int64) bool {
 	// This reduces the nosplit footprint of notetsleep_internal.
 	gp = getg()
 
-	// Register for wakeup on n.key.
+	// Register for wakeup on n->waitm.
 	if !atomic.Casuintptr(&n.key, 0, uintptr(unsafe.Pointer(gp.m))) {
 		// Must be locked (got wakeup).
 		if n.key != locked {

@@ -377,6 +377,8 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 // Clone returns a deep copy of r with its context changed to ctx.
 // The provided ctx must be non-nil.
 //
+// Clone only makes a shallow copy of the Body field.
+//
 // For an outgoing client request, the context controls the entire
 // lifetime of a request and its response: obtaining a connection,
 // sending the request, and reading the response headers and body.
@@ -1076,6 +1078,8 @@ func ReadRequest(b *bufio.Reader) (*Request, error) {
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
 //   - github.com/sagernet/sing
+//   - github.com/v2fly/v2ray-core/v4
+//   - github.com/v2fly/v2ray-core/v5
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.

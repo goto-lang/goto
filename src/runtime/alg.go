@@ -51,10 +51,15 @@ var useAeshash bool
 // Notable members of the hall of shame include:
 //   - github.com/aacfactory/fns
 //   - github.com/dgraph-io/ristretto
+//   - github.com/minio/simdjson-go
 //   - github.com/nbd-wtf/go-nostr
 //   - github.com/outcaste-io/ristretto
 //   - github.com/puzpuzpuz/xsync/v2
 //   - github.com/puzpuzpuz/xsync/v3
+//   - github.com/segmentio/parquet-go
+//   - github.com/parquet-go/parquet-go
+//   - github.com/authzed/spicedb
+//   - github.com/pingcap/badger
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
@@ -62,7 +67,28 @@ var useAeshash bool
 //go:linkname memhash
 func memhash(p unsafe.Pointer, h, s uintptr) uintptr
 
+// memhash32 should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/segmentio/parquet-go
+//   - github.com/parquet-go/parquet-go
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname memhash32
 func memhash32(p unsafe.Pointer, h uintptr) uintptr
+
+// memhash64 should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/segmentio/parquet-go
+//   - github.com/parquet-go/parquet-go
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname memhash64
 func memhash64(p unsafe.Pointer, h uintptr) uintptr
 
 // strhash should be an internal detail,
@@ -72,6 +98,8 @@ func memhash64(p unsafe.Pointer, h uintptr) uintptr
 //   - github.com/bytedance/sonic
 //   - github.com/bytedance/go-tagexpr/v2
 //   - github.com/cloudwego/frugal
+//   - github.com/cloudwego/dynamicgo
+//   - github.com/v2fly/v2ray-core/v5
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
@@ -392,6 +420,16 @@ func ifaceeq(tab *itab, x, y unsafe.Pointer) bool {
 }
 
 // Testing adapters for hash quality tests (see hash_test.go)
+//
+// stringHash should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/k14s/starlark-go
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname stringHash
 func stringHash(s string, seed uintptr) uintptr {
 	return strhash(noescape(unsafe.Pointer(&s)), seed)
 }

@@ -543,7 +543,7 @@ func (pw *pkgWriter) typIdx(typ types2.Type, dict *writerDict) typeInfo {
 
 	case *types2.Alias:
 		w.Code(pkgbits.TypeNamed)
-		w.namedType(typ.Obj(), nil)
+		w.namedType(splitAlias(typ))
 
 	case *types2.TypeParam:
 		w.derived = true
@@ -1582,6 +1582,7 @@ func (w *writer) switchStmt(stmt *syntax.SwitchStmt) {
 	w.stmt(stmt.Init)
 
 	var iface, tagType types2.Type
+	var tagTypeIsChan bool
 	if guard, ok := stmt.Tag.(*syntax.TypeSwitchGuard); w.Bool(ok) {
 		iface = w.p.typeOf(guard.X)
 
@@ -1603,6 +1604,7 @@ func (w *writer) switchStmt(stmt *syntax.SwitchStmt) {
 			tv := w.p.typeAndValue(tag)
 			tagType = tv.Type
 			tagValue = tv.Value
+			_, tagTypeIsChan = tagType.Underlying().(*types2.Chan)
 		} else {
 			tagType = types2.Typ[types2.Bool]
 			tagValue = constant.MakeBool(true)
@@ -1655,12 +1657,18 @@ func (w *writer) switchStmt(stmt *syntax.SwitchStmt) {
 		// have the same type. If there are any case values that can't be
 		// converted to the tag value's type, then convert everything to
 		// `any` instead.
-	Outer:
-		for _, clause := range stmt.Body {
-			for _, cas := range syntax.UnpackListExpr(clause.Cases) {
-				if casType := w.p.typeOf(cas); !types2.AssignableTo(casType, tagType) {
-					tagType = types2.NewInterfaceType(nil, nil)
-					break Outer
+		//
+		// Except that we need to keep comparisons of channel values from
+		// being wrapped in any(). See issue #67190.
+
+		if !tagTypeIsChan {
+		Outer:
+			for _, clause := range stmt.Body {
+				for _, cas := range syntax.UnpackListExpr(clause.Cases) {
+					if casType := w.p.typeOf(cas); !types2.AssignableTo(casType, tagType) {
+						tagType = types2.NewInterfaceType(nil, nil)
+						break Outer
+					}
 				}
 			}
 		}
@@ -1696,7 +1704,11 @@ func (w *writer) switchStmt(stmt *syntax.SwitchStmt) {
 			w.Sync(pkgbits.SyncExprs)
 			w.Len(len(cases))
 			for _, cas := range cases {
-				w.implicitConvExpr(tagType, cas)
+				typ := tagType
+				if tagTypeIsChan {
+					typ = nil
+				}
+				w.implicitConvExpr(typ, cas)
 			}
 		}
 
@@ -2958,6 +2970,9 @@ func objTypeParams(obj types2.Object) *types2.TypeParamList {
 		if !obj.IsAlias() {
 			return obj.Type().(*types2.Named).TypeParams()
 		}
+		if alias, ok := obj.Type().(*types2.Alias); ok {
+			return alias.TypeParams()
+		}
 	}
 	return nil
 }
@@ -2970,6 +2985,14 @@ func splitNamed(typ *types2.Named) (*types2.TypeName, *types2.TypeList) {
 	orig := typ.Origin()
 	base.Assertf(orig.TypeArgs() == nil, "origin %v of %v has type arguments", orig, typ)
 	base.Assertf(typ.Obj() == orig.Obj(), "%v has object %v, but %v has object %v", typ, typ.Obj(), orig, orig.Obj())
+
+	return typ.Obj(), typ.TypeArgs()
+}
+
+// splitAlias is like splitNamed, but for an alias type.
+func splitAlias(typ *types2.Alias) (*types2.TypeName, *types2.TypeList) {
+	orig := typ.Origin()
+	base.Assertf(typ.Obj() == orig.Obj(), "alias type %v has object %v, but %v has object %v", typ, typ.Obj(), orig, orig.Obj())
 
 	return typ.Obj(), typ.TypeArgs()
 }

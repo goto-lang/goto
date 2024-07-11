@@ -629,7 +629,7 @@ Architecture-specific environment variables:
 	GORISCV64
 		For GOARCH=riscv64, the RISC-V user-mode application profile for which
 		to compile. Valid values are rva20u64 (default), rva22u64.
-		See https://github.com/riscv/riscv-profiles/blob/main/profiles.adoc
+		See https://github.com/riscv/riscv-profiles/blob/main/src/profiles.adoc
 	GOWASM
 		For GOARCH=wasm, comma-separated list of experimental WebAssembly features to use.
 		Valid values are satconv, signext.
@@ -835,6 +835,9 @@ line comment that begins
 
 	//go:build
 
+Build constraints can also be used to downgrade the language version
+used to compile a file.
+
 Constraints may appear in any kind of source file (not just Go), but
 they must appear near the top of the file, preceded
 only by blank lines and other comments. These rules mean that in Go
@@ -954,5 +957,9 @@ only when building the package for 32-bit x86.
 Go versions 1.16 and earlier used a different syntax for build constraints,
 with a "// +build" prefix. The gofmt command will add an equivalent //go:build
 constraint when encountering the older syntax.
+
+In modules with a Go version of 1.21 or later, if a file's build constraint
+has a term for a Go major release, the language version used when compiling
+the file will be the minimum version implied by the build constraint.
 `,
 }
