@@ -1120,14 +1120,14 @@ type BlockProfileRecord struct {
 // the [testing] package's -test.blockprofile flag instead
 // of calling BlockProfile directly.
 func BlockProfile(p []BlockProfileRecord) (n int, ok bool) {
+	var m int
 	n, ok = blockProfileInternal(len(p), func(r profilerecord.BlockProfileRecord) {
-		copyBlockProfileRecord(&p[0], r)
-		p = p[1:]
+		copyBlockProfileRecord(&p[m], r)
+		m++
 	})
-	if !ok {
-		return
+	if ok {
+		expandFrames(p[:n])
 	}
-	expandFrames(p[:n])
 	return
 }
 
@@ -1140,7 +1140,7 @@ func expandFrames(p []BlockProfileRecord) {
 			f, more := cf.Next()
 			// f.PC is a "call PC", but later consumers will expect
 			// "return PCs"
-			expandedStack[i] = f.PC + 1
+			expandedStack[j] = f.PC + 1
 			if !more {
 				break
 			}
@@ -1218,14 +1218,14 @@ func pprof_blockProfileInternal(p []profilerecord.BlockProfileRecord) (n int, ok
 // Most clients should use the [runtime/pprof] package
 // instead of calling MutexProfile directly.
 func MutexProfile(p []BlockProfileRecord) (n int, ok bool) {
+	var m int
 	n, ok = mutexProfileInternal(len(p), func(r profilerecord.BlockProfileRecord) {
-		copyBlockProfileRecord(&p[0], r)
-		p = p[1:]
+		copyBlockProfileRecord(&p[m], r)
+		m++
 	})
-	if !ok {
-		return
+	if ok {
+		expandFrames(p[:n])
 	}
-	expandFrames(p[:n])
 	return
 }
 
