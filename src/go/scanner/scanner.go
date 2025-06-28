@@ -44,12 +44,19 @@ type Scanner struct {
 
 	// public state - ok to modify
 	ErrorCount int // number of errors encountered
+
+	isgoto bool // if this scanner currently parses a goto file
 }
 
 const (
 	bom = 0xFEFF // byte order mark, only permitted as very first character
 	eof = -1     // end of file
 )
+
+// enable goto-lang features / alternate goto-lang syntax
+func (s *scanner) isGoto() bool {
+	return s.isgoto
+}
 
 // Read the next Unicode char into s.ch.
 // s.ch < 0 means end-of-file.

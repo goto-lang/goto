@@ -64,7 +64,31 @@ type parser struct {
 	// nestLev is used to track and limit the recursion depth
 	// during parsing.
 	nestLev int
+
+	features gotoFeatures
 }
+
+type gotoFeatures struct {
+	fmtString bool
+}
+
+// ----------------------------------------------------------------------------
+// Goto-Lang additional functions
+
+func (p *parser) isGotoFile() bool {
+	if p.file == nil {
+		return false
+	}
+	return strings.HasSuffix(p.file.filename, ".goto")
+}
+
+// enable goto-lang features / alternate goto-lang syntax
+func (p *parser) isGoto() bool {
+	return p.scanner.isGoto()
+}
+
+// ----------------------------------------------------------------------------
+
 
 func (p *parser) init(fset *token.FileSet, filename string, src []byte, mode Mode) {
 	p.file = fset.AddFile(filename, -1, len(src))
