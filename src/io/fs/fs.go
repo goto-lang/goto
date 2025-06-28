@@ -26,6 +26,7 @@ import (
 // correctness.
 type FS interface {
 	// Open opens the named file.
+	// [File.Close] must be called to release any associated resources.
 	//
 	// When Open returns an error, it should be of type *PathError
 	// with the Op field set to "open", the Path field set to name,
@@ -43,7 +44,7 @@ type FS interface {
 // Path names passed to open are UTF-8-encoded,
 // unrooted, slash-separated sequences of path elements, like “x/y/z”.
 // Path names must not contain an element that is “.” or “..” or the empty string,
-// except for the special case that the root directory is named “.”.
+// except for the special case that the name "." may be used for the root directory.
 // Paths must not start or end with a slash: “/x” and “x/” are invalid.
 //
 // Note that paths are slash-separated on all systems, even Windows.
@@ -128,7 +129,7 @@ type ReadDirFile interface {
 	// At the end of a directory, the error is io.EOF.
 	// (ReadDir must return io.EOF itself, not an error wrapping io.EOF.)
 	//
-	// If n <= 0, ReadDir returns all the DirEntry values from the directory
+	// If n <= 0, ReadDir returns all remaining DirEntry values from the directory
 	// in a single slice. In this case, if ReadDir succeeds (reads all the way
 	// to the end of the directory), it returns the slice and a nil error.
 	// If it encounters an error before the end of the directory,

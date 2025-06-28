@@ -4,7 +4,7 @@
 
 // Tests a G being created from within a syscall.
 //
-// Specifically, it tests a scenerio wherein a C
+// Specifically, it tests a scenario wherein a C
 // thread is calling into Go, creating a goroutine in
 // a syscall (in the tracer's model). Because the actual
 // m can be reused, it's possible for that m to have never
@@ -16,12 +16,13 @@ package main
 
 import (
 	"internal/trace"
-	"internal/trace/event/go122"
-	testgen "internal/trace/internal/testgen/go122"
+	"internal/trace/internal/testgen"
+	"internal/trace/tracev2"
+	"internal/trace/version"
 )
 
 func main() {
-	testgen.Main(gen)
+	testgen.Main(version.Go122, gen)
 }
 
 func gen(t *testgen.Trace) {
@@ -39,7 +40,7 @@ func gen(t *testgen.Trace) {
 	// possible on other platforms, however.
 	b0 := g.Batch(trace.ThreadID(0), 0)
 	b0.Event("GoCreateSyscall", trace.GoID(4))
-	b0.Event("ProcStatus", trace.ProcID(0), go122.ProcIdle)
+	b0.Event("ProcStatus", trace.ProcID(0), tracev2.ProcIdle)
 	b0.Event("ProcStart", trace.ProcID(0), testgen.Seq(1))
 	b0.Event("GoSyscallEndBlocked")
 	b0.Event("GoStart", trace.GoID(4), testgen.Seq(1))

@@ -193,7 +193,11 @@ func doDoubleNext2() Seq2[int, int] {
 }
 
 func TestPullDoubleYield(t *testing.T) {
-	_, stop := Pull(storeYield())
+	next, stop := Pull(storeYield())
+	next()
+	if yieldSlot == nil {
+		t.Fatal("yield failed")
+	}
 	defer func() {
 		if recover() != nil {
 			yieldSlot = nil
@@ -218,7 +222,11 @@ func storeYield() Seq[int] {
 var yieldSlot func(int) bool
 
 func TestPullDoubleYield2(t *testing.T) {
-	_, stop := Pull2(storeYield2())
+	next, stop := Pull2(storeYield2())
+	next()
+	if yieldSlot2 == nil {
+		t.Fatal("yield failed")
+	}
 	defer func() {
 		if recover() != nil {
 			yieldSlot2 = nil
@@ -481,5 +489,21 @@ func TestPull2ImmediateStop(t *testing.T) {
 	// Make sure we don't panic if we try to call next or stop.
 	if _, _, ok := next(); ok {
 		t.Fatal("next returned true after iterator was stopped")
+	}
+}
+
+func BenchmarkPull(b *testing.B) {
+	seq := count(1)
+	for range b.N {
+		_, stop := Pull(seq)
+		stop()
+	}
+}
+
+func BenchmarkPull2(b *testing.B) {
+	seq := squares(1)
+	for range b.N {
+		_, stop := Pull2(seq)
+		stop()
 	}
 }

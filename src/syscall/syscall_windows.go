@@ -138,12 +138,32 @@ func FormatMessage(flags uint32, msgsrc uint32, msgid uint32, langid uint32, buf
 	return formatMessage(flags, uintptr(msgsrc), msgid, langid, buf, args)
 }
 
+var errnoErrorCache sync.Map
+
 func (e Errno) Error() string {
 	// deal with special go errors
 	idx := int(e - APPLICATION_ERROR)
 	if 0 <= idx && idx < len(errors) {
 		return errors[idx]
 	}
+
+	cache := false
+	switch e {
+	case ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND:
+		if cached, ok := errnoErrorCache.Load(e); ok {
+			return cached.(string)
+		}
+		cache = true
+	}
+
+	result := e.error()
+	if cache {
+		errnoErrorCache.Store(e, result)
+	}
+	return result
+}
+
+func (e Errno) error() string {
 	// ask windows for the remaining errors
 	var flags uint32 = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_IGNORE_INSERTS
 	b := make([]uint16, 300)
@@ -235,7 +255,7 @@ func NewCallbackCDecl(fn any) uintptr {
 //sys	GetVersion() (ver uint32, err error)
 //sys	formatMessage(flags uint32, msgsrc uintptr, msgid uint32, langid uint32, buf []uint16, args *byte) (n uint32, err error) = FormatMessageW
 //sys	ExitProcess(exitcode uint32)
-//sys	CreateFile(name *uint16, access uint32, mode uint32, sa *SecurityAttributes, createmode uint32, attrs uint32, templatefile int32) (handle Handle, err error) [failretval==InvalidHandle] = CreateFileW
+//sys	createFile(name *uint16, access uint32, mode uint32, sa *SecurityAttributes, createmode uint32, attrs uint32, templatefile int32) (handle Handle, err error) [failretval == InvalidHandle || e1 == ERROR_ALREADY_EXISTS ] = CreateFileW
 //sys	readFile(handle Handle, buf []byte, done *uint32, overlapped *Overlapped) (err error) = ReadFile
 //sys	writeFile(handle Handle, buf []byte, done *uint32, overlapped *Overlapped) (err error) = WriteFile
 //sys	SetFilePointer(handle Handle, lowoffset int32, highoffsetptr *int32, whence uint32) (newlowoffset uint32, err error) [failretval==0xffffffff]
@@ -287,6 +307,7 @@ func NewCallbackCDecl(fn any) uintptr {
 //sys	GetCommandLine() (cmd *uint16) = kernel32.GetCommandLineW
 //sys	CommandLineToArgv(cmd *uint16, argc *int32) (argv *[8192]*[8192]uint16, err error) [failretval==nil] = shell32.CommandLineToArgvW
 //sys	LocalFree(hmem Handle) (handle Handle, err error) [failretval!=0]
+//sys	localAlloc(flags uint32, length uint32) (ptr uintptr, err error) = kernel32.LocalAlloc
 //sys	SetHandleInformation(handle Handle, mask uint32, flags uint32) (err error)
 //sys	FlushFileBuffers(handle Handle) (err error)
 //sys	GetFullPathName(path *uint16, buflen uint32, buf *uint16, fname **uint16) (n uint32, err error) = kernel32.GetFullPathNameW
@@ -323,6 +344,7 @@ func NewCallbackCDecl(fn any) uintptr {
 //sys	Process32First(snapshot Handle, procEntry *ProcessEntry32) (err error) = kernel32.Process32FirstW
 //sys	Process32Next(snapshot Handle, procEntry *ProcessEntry32) (err error) = kernel32.Process32NextW
 //sys	DeviceIoControl(handle Handle, ioControlCode uint32, inBuffer *byte, inBufferSize uint32, outBuffer *byte, outBufferSize uint32, bytesReturned *uint32, overlapped *Overlapped) (err error)
+//sys	setFileInformationByHandle(handle Handle, fileInformationClass uint32, buf unsafe.Pointer, bufsize uint32) (err error) = kernel32.SetFileInformationByHandle
 // This function returns 1 byte BOOLEAN rather than the 4 byte BOOL.
 //sys	CreateSymbolicLink(symlinkfilename *uint16, targetfilename *uint16, flags uint32) (err error) [failretval&0xff==0] = CreateSymbolicLinkW
 //sys	CreateHardLink(filename *uint16, existingfilename *uint16, reserved uintptr) (err error) [failretval&0xff==0] = CreateHardLinkW
@@ -340,16 +362,17 @@ func makeInheritSa() *SecurityAttributes {
 	return &sa
 }
 
-func Open(path string, mode int, perm uint32) (fd Handle, err error) {
-	if len(path) == 0 {
+func Open(name string, flag int, perm uint32) (fd Handle, err error) {
+	if len(name) == 0 {
 		return InvalidHandle, ERROR_FILE_NOT_FOUND
 	}
-	pathp, err := UTF16PtrFromString(path)
+	namep, err := UTF16PtrFromString(name)
 	if err != nil {
 		return InvalidHandle, err
 	}
+	accessFlags := flag & (O_RDONLY | O_WRONLY | O_RDWR)
 	var access uint32
-	switch mode & (O_RDONLY | O_WRONLY | O_RDWR) {
+	switch accessFlags {
 	case O_RDONLY:
 		access = GENERIC_READ
 	case O_WRONLY:
@@ -357,64 +380,80 @@ func Open(path string, mode int, perm uint32) (fd Handle, err error) {
 	case O_RDWR:
 		access = GENERIC_READ | GENERIC_WRITE
 	}
-	if mode&O_CREAT != 0 {
+	if flag&O_CREAT != 0 {
 		access |= GENERIC_WRITE
 	}
-	if mode&O_APPEND != 0 {
-		access &^= GENERIC_WRITE
-		access |= FILE_APPEND_DATA
+	if flag&O_APPEND != 0 {
+		// Remove GENERIC_WRITE unless O_TRUNC is set, in which case we need it to truncate the file.
+		// We can't just remove FILE_WRITE_DATA because GENERIC_WRITE without FILE_WRITE_DATA
+		// starts appending at the beginning of the file rather than at the end.
+		if flag&O_TRUNC == 0 {
+			access &^= GENERIC_WRITE
+		}
+		// Set all access rights granted by GENERIC_WRITE except for FILE_WRITE_DATA.
+		access |= FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | _FILE_WRITE_EA | STANDARD_RIGHTS_WRITE | SYNCHRONIZE
 	}
 	sharemode := uint32(FILE_SHARE_READ | FILE_SHARE_WRITE)
 	var sa *SecurityAttributes
-	if mode&O_CLOEXEC == 0 {
+	if flag&O_CLOEXEC == 0 {
 		sa = makeInheritSa()
-	}
-	var createmode uint32
-	switch {
-	case mode&(O_CREAT|O_EXCL) == (O_CREAT | O_EXCL):
-		createmode = CREATE_NEW
-	case mode&(O_CREAT|O_TRUNC) == (O_CREAT | O_TRUNC):
-		createmode = CREATE_ALWAYS
-	case mode&O_CREAT == O_CREAT:
-		createmode = OPEN_ALWAYS
-	case mode&O_TRUNC == O_TRUNC:
-		createmode = TRUNCATE_EXISTING
-	default:
-		createmode = OPEN_EXISTING
 	}
 	var attrs uint32 = FILE_ATTRIBUTE_NORMAL
 	if perm&S_IWRITE == 0 {
 		attrs = FILE_ATTRIBUTE_READONLY
-		if createmode == CREATE_ALWAYS {
-			// We have been asked to create a read-only file.
-			// If the file already exists, the semantics of
-			// the Unix open system call is to preserve the
-			// existing permissions. If we pass CREATE_ALWAYS
-			// and FILE_ATTRIBUTE_READONLY to CreateFile,
-			// and the file already exists, CreateFile will
-			// change the file permissions.
-			// Avoid that to preserve the Unix semantics.
-			h, e := CreateFile(pathp, access, sharemode, sa, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
-			switch e {
-			case ERROR_FILE_NOT_FOUND, _ERROR_BAD_NETPATH, ERROR_PATH_NOT_FOUND:
-				// File does not exist. These are the same
-				// errors as Errno.Is checks for ErrNotExist.
-				// Carry on to create the file.
-			default:
-				// Success or some different error.
-				return h, e
-			}
-		}
 	}
-	if createmode == OPEN_EXISTING && access == GENERIC_READ {
-		// Necessary for opening directory handles.
+	switch accessFlags {
+	case O_WRONLY, O_RDWR:
+		// Unix doesn't allow opening a directory with O_WRONLY
+		// or O_RDWR, so we don't set the flag in that case,
+		// which will make CreateFile fail with ERROR_ACCESS_DENIED.
+		// We will map that to EISDIR if the file is a directory.
+	default:
+		// We might be opening a directory for reading,
+		// and CreateFile requires FILE_FLAG_BACKUP_SEMANTICS
+		// to work with directories.
 		attrs |= FILE_FLAG_BACKUP_SEMANTICS
 	}
-	if mode&O_SYNC != 0 {
+	if flag&O_SYNC != 0 {
 		const _FILE_FLAG_WRITE_THROUGH = 0x80000000
 		attrs |= _FILE_FLAG_WRITE_THROUGH
 	}
-	return CreateFile(pathp, access, sharemode, sa, createmode, attrs, 0)
+	// We don't use CREATE_ALWAYS, because when opening a file with
+	// FILE_ATTRIBUTE_READONLY these will replace an existing file
+	// with a new, read-only one. See https://go.dev/issue/38225.
+	//
+	// Instead, we ftruncate the file after opening when O_TRUNC is set.
+	var createmode uint32
+	switch {
+	case flag&(O_CREAT|O_EXCL) == (O_CREAT | O_EXCL):
+		createmode = CREATE_NEW
+		attrs |= FILE_FLAG_OPEN_REPARSE_POINT // don't follow symlinks
+	case flag&O_CREAT == O_CREAT:
+		createmode = OPEN_ALWAYS
+	default:
+		createmode = OPEN_EXISTING
+	}
+	h, err := createFile(namep, access, sharemode, sa, createmode, attrs, 0)
+	if h == InvalidHandle {
+		if err == ERROR_ACCESS_DENIED && (attrs&FILE_FLAG_BACKUP_SEMANTICS == 0) {
+			// We should return EISDIR when we are trying to open a directory with write access.
+			fa, e1 := GetFileAttributes(namep)
+			if e1 == nil && fa&FILE_ATTRIBUTE_DIRECTORY != 0 {
+				err = EISDIR
+			}
+		}
+		return h, err
+	}
+	// Ignore O_TRUNC if the file has just been created.
+	if flag&O_TRUNC == O_TRUNC &&
+		(createmode == OPEN_EXISTING || (createmode == OPEN_ALWAYS && err == ERROR_ALREADY_EXISTS)) {
+		err = Ftruncate(h, 0)
+		if err != nil {
+			CloseHandle(h)
+			return InvalidHandle, err
+		}
+	}
+	return h, nil
 }
 
 func Read(fd Handle, p []byte) (n int, err error) {
@@ -610,20 +649,13 @@ func ComputerName() (name string, err error) {
 }
 
 func Ftruncate(fd Handle, length int64) (err error) {
-	curoffset, e := Seek(fd, 0, 1)
-	if e != nil {
-		return e
+	type _FILE_END_OF_FILE_INFO struct {
+		EndOfFile int64
 	}
-	defer Seek(fd, curoffset, 0)
-	_, e = Seek(fd, length, 0)
-	if e != nil {
-		return e
-	}
-	e = SetEndOfFile(fd)
-	if e != nil {
-		return e
-	}
-	return nil
+	const FileEndOfFileInfo = 6
+	var info _FILE_END_OF_FILE_INFO
+	info.EndOfFile = length
+	return setFileInformationByHandle(fd, FileEndOfFileInfo, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info)))
 }
 
 func Gettimeofday(tv *Timeval) (err error) {
@@ -855,23 +887,29 @@ func (sa *SockaddrUnix) sockaddr() (unsafe.Pointer, int32, error) {
 	if n > len(sa.raw.Path) {
 		return nil, 0, EINVAL
 	}
-	if n == len(sa.raw.Path) && name[0] != '@' {
+	// Abstract addresses start with NUL.
+	// '@' is also a valid way to specify abstract addresses.
+	isAbstract := n > 0 && (name[0] == '@' || name[0] == '\x00')
+
+	// Non-abstract named addresses are NUL terminated.
+	// The length can't use the full capacity as we need to add NUL.
+	if n == len(sa.raw.Path) && !isAbstract {
 		return nil, 0, EINVAL
 	}
 	sa.raw.Family = AF_UNIX
 	for i := 0; i < n; i++ {
 		sa.raw.Path[i] = int8(name[i])
 	}
-	// length is family (uint16), name, NUL.
-	sl := int32(2)
-	if n > 0 {
-		sl += int32(n) + 1
-	}
-	if sa.raw.Path[0] == '@' || (sa.raw.Path[0] == 0 && sl > 3) {
-		// Check sl > 3 so we don't change unnamed socket behavior.
+	// Length is family + name (+ NUL if non-abstract).
+	// Family is of type uint16 (2 bytes).
+	sl := int32(2 + n)
+	if isAbstract {
+		// Abstract addresses are not NUL terminated.
+		// We rewrite '@' prefix to NUL here.
 		sa.raw.Path[0] = 0
-		// Don't count trailing NUL for abstract address.
-		sl--
+	} else if n > 0 {
+		// Add NUL for non-abstract named addresses.
+		sl++
 	}
 
 	return unsafe.Pointer(&sa.raw), sl, nil
@@ -1182,7 +1220,9 @@ func SetsockoptInet4Addr(fd Handle, level, opt int, value [4]byte) (err error) {
 func SetsockoptIPMreq(fd Handle, level, opt int, mreq *IPMreq) (err error) {
 	return Setsockopt(fd, int32(level), int32(opt), (*byte)(unsafe.Pointer(mreq)), int32(unsafe.Sizeof(*mreq)))
 }
-func SetsockoptIPv6Mreq(fd Handle, level, opt int, mreq *IPv6Mreq) (err error) { return EWINDOWS }
+func SetsockoptIPv6Mreq(fd Handle, level, opt int, mreq *IPv6Mreq) (err error) {
+	return Setsockopt(fd, int32(level), int32(opt), (*byte)(unsafe.Pointer(mreq)), int32(unsafe.Sizeof(*mreq)))
+}
 
 func Getpid() (pid int) { return int(getCurrentProcessId()) }
 
@@ -1400,10 +1440,8 @@ func PostQueuedCompletionStatus(cphandle Handle, qty uint32, key uint32, overlap
 	return postQueuedCompletionStatus(cphandle, qty, uintptr(key), overlapped)
 }
 
-// newProcThreadAttributeList allocates new PROC_THREAD_ATTRIBUTE_LIST, with
-// the requested maximum number of attributes, which must be cleaned up by
-// deleteProcThreadAttributeList.
-func newProcThreadAttributeList(maxAttrCount uint32) (*_PROC_THREAD_ATTRIBUTE_LIST, error) {
+// newProcThreadAttributeList allocates a new [procThreadAttributeListContainer], with the requested maximum number of attributes.
+func newProcThreadAttributeList(maxAttrCount uint32) (*procThreadAttributeListContainer, error) {
 	var size uintptr
 	err := initializeProcThreadAttributeList(nil, maxAttrCount, 0, &size)
 	if err != ERROR_INSUFFICIENT_BUFFER {
@@ -1412,13 +1450,38 @@ func newProcThreadAttributeList(maxAttrCount uint32) (*_PROC_THREAD_ATTRIBUTE_LI
 		}
 		return nil, err
 	}
-	// size is guaranteed to be ≥1 by initializeProcThreadAttributeList.
-	al := (*_PROC_THREAD_ATTRIBUTE_LIST)(unsafe.Pointer(&make([]byte, size)[0]))
-	err = initializeProcThreadAttributeList(al, maxAttrCount, 0, &size)
+	const LMEM_FIXED = 0
+	alloc, err := localAlloc(LMEM_FIXED, uint32(size))
 	if err != nil {
 		return nil, err
 	}
-	return al, nil
+	// size is guaranteed to be ≥1 by InitializeProcThreadAttributeList.
+	al := &procThreadAttributeListContainer{data: (*_PROC_THREAD_ATTRIBUTE_LIST)(unsafe.Pointer(alloc))}
+	err = initializeProcThreadAttributeList(al.data, maxAttrCount, 0, &size)
+	if err != nil {
+		return nil, err
+	}
+	al.pointers = make([]unsafe.Pointer, 0, maxAttrCount)
+	return al, err
+}
+
+// Update modifies the ProcThreadAttributeList using UpdateProcThreadAttribute.
+func (al *procThreadAttributeListContainer) update(attribute uintptr, value unsafe.Pointer, size uintptr) error {
+	al.pointers = append(al.pointers, value)
+	return updateProcThreadAttribute(al.data, 0, attribute, value, size, nil, nil)
+}
+
+// Delete frees ProcThreadAttributeList's resources.
+func (al *procThreadAttributeListContainer) delete() {
+	deleteProcThreadAttributeList(al.data)
+	LocalFree(Handle(unsafe.Pointer(al.data)))
+	al.data = nil
+	al.pointers = nil
+}
+
+// List returns the actual ProcThreadAttributeList to be passed to StartupInfoEx.
+func (al *procThreadAttributeListContainer) list() *_PROC_THREAD_ATTRIBUTE_LIST {
+	return al.data
 }
 
 // RegEnumKeyEx enumerates the subkeys of an open registry key.
@@ -1452,4 +1515,14 @@ func RegEnumKeyEx(key Handle, index uint32, name *uint16, nameLen *uint32, reser
 func GetStartupInfo(startupInfo *StartupInfo) error {
 	getStartupInfo(startupInfo)
 	return nil
+}
+
+func CreateFile(name *uint16, access uint32, mode uint32, sa *SecurityAttributes, createmode uint32, attrs uint32, templatefile int32) (handle Handle, err error) {
+	handle, err = createFile(name, access, mode, sa, createmode, attrs, templatefile)
+	if handle != InvalidHandle {
+		// CreateFileW can return ERROR_ALREADY_EXISTS with a valid handle.
+		// We only want to return an error if the handle is invalid.
+		err = nil
+	}
+	return handle, err
 }

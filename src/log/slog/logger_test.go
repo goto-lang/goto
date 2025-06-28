@@ -5,13 +5,20 @@
 package slog
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"internal/asan"
+	"internal/msan"
 	"internal/race"
 	"internal/testenv"
 	"io"
 	"log"
 	loginternal "log/internal"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -183,7 +190,10 @@ func TestCallDepth(t *testing.T) {
 		const wantFunc = "log/slog.TestCallDepth"
 		const wantFile = "logger_test.go"
 		wantLine := startLine + count*2
-		got := h.r.source()
+		got := h.r.Source()
+		if got == nil {
+			t.Fatal("got nil source")
+		}
 		gotFile := filepath.Base(got.File)
 		if got.Function != wantFunc || gotFile != wantFile || got.Line != wantLine {
 			t.Errorf("got (%s, %s, %d), want (%s, %s, %d)",
@@ -227,9 +237,100 @@ func TestCallDepth(t *testing.T) {
 	check(11)
 }
 
+func TestCallDepthConnection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	testenv.MustHaveExec(t)
+	ep, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable failed: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		log  func()
+	}{
+		{"log.Fatal", func() { log.Fatal("log.Fatal") }},
+		{"log.Fatalf", func() { log.Fatalf("log.Fatalf") }},
+		{"log.Fatalln", func() { log.Fatalln("log.Fatalln") }},
+		{"log.Output", func() { log.Output(1, "log.Output") }},
+		{"log.Panic", func() { log.Panic("log.Panic") }},
+		{"log.Panicf", func() { log.Panicf("log.Panicf") }},
+		{"log.Panicln", func() { log.Panicf("log.Panicln") }},
+		{"log.Default.Fatal", func() { log.Default().Fatal("log.Default.Fatal") }},
+		{"log.Default.Fatalf", func() { log.Default().Fatalf("log.Default.Fatalf") }},
+		{"log.Default.Fatalln", func() { log.Default().Fatalln("log.Default.Fatalln") }},
+		{"log.Default.Output", func() { log.Default().Output(1, "log.Default.Output") }},
+		{"log.Default.Panic", func() { log.Default().Panic("log.Default.Panic") }},
+		{"log.Default.Panicf", func() { log.Default().Panicf("log.Default.Panicf") }},
+		{"log.Default.Panicln", func() { log.Default().Panicf("log.Default.Panicln") }},
+	}
+
+	// calculate the line offset until the first test case
+	_, _, line, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller failed")
+	}
+	line -= len(tests) + 3
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// inside spawned test executable
+			const envVar = "SLOGTEST_CALL_DEPTH_CONNECTION"
+			if os.Getenv(envVar) == "1" {
+				h := NewTextHandler(os.Stderr, &HandlerOptions{
+					AddSource: true,
+					ReplaceAttr: func(groups []string, a Attr) Attr {
+						if (a.Key == MessageKey || a.Key == SourceKey) && len(groups) == 0 {
+							return a
+						}
+						return Attr{}
+					},
+				})
+				SetDefault(New(h))
+				log.SetFlags(log.Lshortfile)
+				tt.log()
+				os.Exit(1)
+			}
+
+			// spawn test executable
+			cmd := testenv.Command(t, ep,
+				"-test.run=^"+regexp.QuoteMeta(t.Name())+"$",
+				"-test.count=1",
+			)
+			cmd.Env = append(cmd.Environ(), envVar+"=1")
+
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected exec.ExitError: %v", err)
+			}
+
+			_, firstLine, err := bufio.ScanLines(out, true)
+			if err != nil {
+				t.Fatalf("failed to split line: %v", err)
+			}
+			got := string(firstLine)
+
+			want := fmt.Sprintf(
+				`msg="logger_test.go:%d: %s"`,
+				line+i, tt.name,
+			)
+			if got != want {
+				t.Errorf(
+					"output from %s() mismatch:\n\t got: %s\n\twant: %s",
+					tt.name, got, want,
+				)
+			}
+		})
+	}
+}
+
 func TestAlloc(t *testing.T) {
 	ctx := context.Background()
-	dl := New(discardHandler{})
+	dl := New(discardTestHandler{})
 	defer SetDefault(Default()) // restore
 	SetDefault(dl)
 
@@ -248,7 +349,7 @@ func TestAlloc(t *testing.T) {
 	t.Run("2 pairs", func(t *testing.T) {
 		s := "abc"
 		i := 2000
-		wantAllocs(t, 2, func() {
+		wantAllocs(t, 0, func() {
 			dl.Info("hello",
 				"n", i,
 				"s", s,
@@ -256,10 +357,10 @@ func TestAlloc(t *testing.T) {
 		})
 	})
 	t.Run("2 pairs disabled inline", func(t *testing.T) {
-		l := New(discardHandler{disabled: true})
+		l := New(DiscardHandler)
 		s := "abc"
 		i := 2000
-		wantAllocs(t, 2, func() {
+		wantAllocs(t, 0, func() {
 			l.Log(ctx, LevelInfo, "hello",
 				"n", i,
 				"s", s,
@@ -267,7 +368,7 @@ func TestAlloc(t *testing.T) {
 		})
 	})
 	t.Run("2 pairs disabled", func(t *testing.T) {
-		l := New(discardHandler{disabled: true})
+		l := New(DiscardHandler)
 		s := "abc"
 		i := 2000
 		wantAllocs(t, 0, func() {
@@ -283,7 +384,7 @@ func TestAlloc(t *testing.T) {
 		s := "abc"
 		i := 2000
 		d := time.Second
-		wantAllocs(t, 10, func() {
+		wantAllocs(t, 1, func() {
 			dl.Info("hello",
 				"n", i, "s", s, "d", d,
 				"n", i, "s", s, "d", d,
@@ -303,7 +404,7 @@ func TestAlloc(t *testing.T) {
 		})
 	})
 	t.Run("attrs3 disabled", func(t *testing.T) {
-		logger := New(discardHandler{disabled: true})
+		logger := New(DiscardHandler)
 		wantAllocs(t, 0, func() {
 			logger.LogAttrs(ctx, LevelInfo, "hello", Int("a", 1), String("b", "two"), Duration("c", time.Second))
 		})
@@ -566,18 +667,17 @@ func (c *captureHandler) clear() {
 	c.r = Record{}
 }
 
-type discardHandler struct {
-	disabled bool
-	attrs    []Attr
+type discardTestHandler struct {
+	attrs []Attr
 }
 
-func (d discardHandler) Enabled(context.Context, Level) bool { return !d.disabled }
-func (discardHandler) Handle(context.Context, Record) error  { return nil }
-func (d discardHandler) WithAttrs(as []Attr) Handler {
+func (d discardTestHandler) Enabled(context.Context, Level) bool { return true }
+func (discardTestHandler) Handle(context.Context, Record) error  { return nil }
+func (d discardTestHandler) WithAttrs(as []Attr) Handler {
 	d.attrs = concat(d.attrs, as)
 	return d
 }
-func (h discardHandler) WithGroup(name string) Handler {
+func (h discardTestHandler) WithGroup(name string) Handler {
 	return h
 }
 
@@ -644,8 +744,8 @@ func callerPC(depth int) uintptr {
 }
 
 func wantAllocs(t *testing.T, want int, f func()) {
-	if race.Enabled {
-		t.Skip("skipping test in race mode")
+	if race.Enabled || asan.Enabled || msan.Enabled {
+		t.Skip("skipping test in race, asan, and msan modes")
 	}
 	testenv.SkipIfOptimizationOff(t)
 	t.Helper()

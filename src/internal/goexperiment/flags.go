@@ -51,7 +51,7 @@ package goexperiment
 // tags, experiments use the strings.ToLower of their field name.
 //
 // For the baseline experimental configuration, see
-// objabi.experimentBaseline.
+// [internal/buildcfg.ParseGOEXPERIMENT].
 //
 // If you change this struct definition, run "go generate".
 type Flags struct {
@@ -83,10 +83,6 @@ type Flags struct {
 	// by default.
 	HeapMinimum512KiB bool
 
-	// CoverageRedesign enables the new compiler-based code coverage
-	// tooling.
-	CoverageRedesign bool
-
 	// Arenas causes the "arena" standard library package to be visible
 	// to the outside world.
 	Arenas bool
@@ -113,6 +109,24 @@ type Flags struct {
 
 	// AliasTypeParams enables type parameters for alias types.
 	// Requires that gotypesalias=1 is set with GODEBUG.
-	// This flag will be removed with Go 1.24.
+	// This flag will be removed with Go 1.25.
 	AliasTypeParams bool
+
+	// SwissMap enables the SwissTable-based map implementation.
+	SwissMap bool
+
+	// SyncHashTrieMap enables the HashTrieMap sync.Map implementation.
+	SyncHashTrieMap bool
+
+	// Synctest enables the testing/synctest package.
+	Synctest bool
+
+	// Dwarf5 enables DWARF version 5 debug info generation.
+	Dwarf5 bool
+
+	// JSONv2 enables the json/v2 package.
+	JSONv2 bool
+
+	// GreenTeaGC enables the Green Tea GC implementation.
+	GreenTeaGC bool
 }

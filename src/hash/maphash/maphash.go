@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package maphash provides hash functions on byte sequences.
+// Package maphash provides hash functions on byte sequences and comparable values.
 // These hash functions are intended to be used to implement hash tables or
 // other data structures that need to map arbitrary strings or byte
 // sequences to a uniform distribution on unsigned 64-bit integers.
@@ -11,6 +11,11 @@
 // The hash functions are not cryptographically secure.
 // (See crypto/sha256 and crypto/sha512 for cryptographic use.)
 package maphash
+
+import (
+	"hash"
+	"internal/abi"
+)
 
 // A Seed is a random value that selects the specific hash function
 // computed by a [Hash]. If two Hashes use the same Seeds, they
@@ -75,7 +80,7 @@ func String(seed Seed, s string) uint64 {
 //
 // The zero Hash is a valid Hash ready to use.
 // A zero Hash chooses a random seed for itself during
-// the first call to a Reset, Write, Seed, or Sum64 method.
+// the first call to a Reset, Write, Seed, Clone, or Sum64 method.
 // For control over the seed, use SetSeed.
 //
 // The computed hash values depend only on the initial seed and
@@ -275,3 +280,31 @@ func (h *Hash) Size() int { return 8 }
 
 // BlockSize returns h's block size.
 func (h *Hash) BlockSize() int { return len(h.buf) }
+
+// Clone implements [hash.Cloner].
+func (h *Hash) Clone() (hash.Cloner, error) {
+	h.initSeed()
+	r := *h
+	return &r, nil
+}
+
+// Comparable returns the hash of comparable value v with the given seed
+// such that Comparable(s, v1) == Comparable(s, v2) if v1 == v2.
+// If v != v, then the resulting hash is randomly distributed.
+func Comparable[T comparable](seed Seed, v T) uint64 {
+	abi.EscapeNonString(v)
+	return comparableHash(v, seed)
+}
+
+// WriteComparable adds x to the data hashed by h.
+func WriteComparable[T comparable](h *Hash, x T) {
+	abi.EscapeNonString(x)
+	// writeComparable (not in purego mode) directly operates on h.state
+	// without using h.buf. Mix in the buffer length so it won't
+	// commute with a buffered write, which either changes h.n or changes
+	// h.state.
+	if h.n != 0 {
+		writeComparable(h, h.n)
+	}
+	writeComparable(h, x)
+}

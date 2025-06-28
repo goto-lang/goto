@@ -20,7 +20,8 @@ package runtime
 import (
 	"internal/abi"
 	"internal/runtime/atomic"
-	"runtime/internal/math"
+	"internal/runtime/math"
+	"internal/runtime/sys"
 	"unsafe"
 )
 
@@ -42,6 +43,7 @@ type hchan struct {
 	recvx    uint   // receive index
 	recvq    waitq  // list of recv waiters
 	sendq    waitq  // list of send waiters
+	bubble   *synctestBubble
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -111,6 +113,9 @@ func makechan(t *chantype, size int) *hchan {
 	c.elemsize = uint16(elem.Size_)
 	c.elemtype = elem
 	c.dataqsiz = uint(size)
+	if b := getg().bubble; b != nil {
+		c.bubble = b
+	}
 	lockInit(&c.lock, lockRankHchan)
 
 	if debugChan {
@@ -153,7 +158,7 @@ func full(c *hchan) bool {
 //
 //go:nosplit
 func chansend1(c *hchan, elem unsafe.Pointer) {
-	chansend(c, elem, true, getcallerpc())
+	chansend(c, elem, true, sys.GetCallerPC())
 }
 
 /*
@@ -183,6 +188,10 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 
 	if raceenabled {
 		racereadpc(c.raceaddr(), callerpc, abi.FuncPCABIInternal(chansend))
+	}
+
+	if c.bubble != nil && getg().bubble != c.bubble {
+		panic(plainError("send on synctest channel from outside bubble"))
 	}
 
 	// Fast path: check for failed non-blocking operation without acquiring the lock.
@@ -267,7 +276,11 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	// changes and when we set gp.activeStackChans is not safe for
 	// stack shrinking.
 	gp.parkingOnChan.Store(true)
-	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceBlockChanSend, 2)
+	reason := waitReasonChanSend
+	if c.bubble != nil {
+		reason = waitReasonSynctestChanSend
+	}
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), reason, traceBlockChanSend, 2)
 	// Ensure the value being sent is kept alive until the
 	// receiver copies it out. The sudog has a pointer to the
 	// stack object, but sudogs aren't considered as roots of the
@@ -303,6 +316,10 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 // sg must already be dequeued from c.
 // ep must be non-nil and point to the heap or the caller's stack.
 func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
+	if c.bubble != nil && getg().bubble != c.bubble {
+		unlockf()
+		panic(plainError("send on synctest channel from outside bubble"))
+	}
 	if raceenabled {
 		if c.dataqsiz == 0 {
 			racesync(c, sg)
@@ -398,6 +415,9 @@ func closechan(c *hchan) {
 	if c == nil {
 		panic(plainError("close of nil channel"))
 	}
+	if c.bubble != nil && getg().bubble != c.bubble {
+		panic(plainError("close of synctest channel from outside bubble"))
+	}
 
 	lock(&c.lock)
 	if c.closed != 0 {
@@ -406,7 +426,7 @@ func closechan(c *hchan) {
 	}
 
 	if raceenabled {
-		callerpc := getcallerpc()
+		callerpc := sys.GetCallerPC()
 		racewritepc(c.raceaddr(), callerpc, abi.FuncPCABIInternal(closechan))
 		racerelease(c.raceaddr())
 	}
@@ -477,7 +497,7 @@ func empty(c *hchan) bool {
 	// c.timer is also immutable (it is set after make(chan) but before any channel operations).
 	// All timer channels have dataqsiz > 0.
 	if c.timer != nil {
-		c.timer.maybeRunChan()
+		c.timer.maybeRunChan(c)
 	}
 	return atomic.Loaduint(&c.qcount) == 0
 }
@@ -517,8 +537,12 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		throw("unreachable")
 	}
 
+	if c.bubble != nil && getg().bubble != c.bubble {
+		panic(plainError("receive on synctest channel from outside bubble"))
+	}
+
 	if c.timer != nil {
-		c.timer.maybeRunChan()
+		c.timer.maybeRunChan(c)
 	}
 
 	// Fast path: check for failed non-blocking operation without acquiring the lock.
@@ -636,7 +660,11 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	// changes and when we set gp.activeStackChans is not safe for
 	// stack shrinking.
 	gp.parkingOnChan.Store(true)
-	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanReceive, traceBlockChanRecv, 2)
+	reason := waitReasonChanReceive
+	if c.bubble != nil {
+		reason = waitReasonSynctestChanReceive
+	}
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), reason, traceBlockChanRecv, 2)
 
 	// someone woke us up
 	if mysg != gp.waiting {
@@ -672,6 +700,10 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 // sg must already be dequeued from c.
 // A non-nil ep must point to the heap or the caller's stack.
 func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
+	if c.bubble != nil && getg().bubble != c.bubble {
+		unlockf()
+		panic(plainError("receive on synctest channel from outside bubble"))
+	}
 	if c.dataqsiz == 0 {
 		if raceenabled {
 			racesync(c, sg)
@@ -750,7 +782,7 @@ func chanparkcommit(gp *g, chanLock unsafe.Pointer) bool {
 //		... bar
 //	}
 func selectnbsend(c *hchan, elem unsafe.Pointer) (selected bool) {
-	return chansend(c, elem, false, getcallerpc())
+	return chansend(c, elem, false, sys.GetCallerPC())
 }
 
 // compiler implements
@@ -775,7 +807,7 @@ func selectnbrecv(elem unsafe.Pointer, c *hchan) (selected, received bool) {
 
 //go:linkname reflect_chansend reflect.chansend0
 func reflect_chansend(c *hchan, elem unsafe.Pointer, nb bool) (selected bool) {
-	return chansend(c, elem, !nb, getcallerpc())
+	return chansend(c, elem, !nb, sys.GetCallerPC())
 }
 
 //go:linkname reflect_chanrecv reflect.chanrecv
@@ -789,7 +821,7 @@ func chanlen(c *hchan) int {
 	}
 	async := debug.asynctimerchan.Load() != 0
 	if c.timer != nil && async {
-		c.timer.maybeRunChan()
+		c.timer.maybeRunChan(c)
 	}
 	if c.timer != nil && !async {
 		// timer channels have a buffered implementation
@@ -875,8 +907,11 @@ func (q *waitq) dequeue() *sudog {
 		// We use a flag in the G struct to tell us when someone
 		// else has won the race to signal this goroutine but the goroutine
 		// hasn't removed itself from the queue yet.
-		if sgp.isSelect && !sgp.g.selectDone.CompareAndSwap(0, 1) {
-			continue
+		if sgp.isSelect {
+			if !sgp.g.selectDone.CompareAndSwap(0, 1) {
+				// We lost the race to wake this goroutine.
+				continue
+			}
 		}
 
 		return sgp

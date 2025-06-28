@@ -3,16 +3,19 @@
 // license that can be found in the LICENSE file.
 
 // Package url parses URLs and implements query escaping.
+//
+// See RFC 3986. This package generally follows RFC 3986, except where
+// it deviates for compatibility reasons.
+// RFC 6874 followed for IPv6 zone literals.
 package url
 
-// See RFC 3986. This package generally follows RFC 3986, except where
-// it deviates for compatibility reasons. When sending changes, first
-// search old issues for history on decisions. Unit tests should also
-// contain references to issue numbers with details.
+// When sending changes, first  search old issues for history on decisions.
+// Unit tests should also contain references to issue numbers with details.
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strconv"
@@ -66,8 +69,9 @@ func unhex(c byte) byte {
 		return c - 'a' + 10
 	case 'A' <= c && c <= 'F':
 		return c - 'A' + 10
+	default:
+		panic("invalid hex character")
 	}
-	return 0
 }
 
 type encoding int
@@ -1004,12 +1008,7 @@ func (v Values) Encode() string {
 		return ""
 	}
 	var buf strings.Builder
-	keys := make([]string, 0, len(v))
-	for k := range v {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(v)) {
 		vs := v[k]
 		keyEscaped := QueryEscape(k)
 		for _, v := range vs {
@@ -1219,7 +1218,11 @@ func splitHostPort(hostPort string) (host, port string) {
 // Would like to implement MarshalText/UnmarshalText but that will change the JSON representation of URLs.
 
 func (u *URL) MarshalBinary() (text []byte, err error) {
-	return []byte(u.String()), nil
+	return u.AppendBinary(nil)
+}
+
+func (u *URL) AppendBinary(b []byte) ([]byte, error) {
+	return append(b, u.String()...), nil
 }
 
 func (u *URL) UnmarshalBinary(text []byte) error {
@@ -1277,7 +1280,18 @@ func validUserinfo(s string) bool {
 		}
 		switch r {
 		case '-', '.', '_', ':', '~', '!', '$', '&', '\'',
-			'(', ')', '*', '+', ',', ';', '=', '%', '@':
+			'(', ')', '*', '+', ',', ';', '=', '%':
+			continue
+		case '@':
+			// `RFC 3986 section 3.2.1` does not allow '@' in userinfo.
+			// It is a delimiter between userinfo and host.
+			// However, URLs are diverse, and in some cases,
+			// the userinfo may contain an '@' character,
+			// for example, in "http://username:p@ssword@google.com",
+			// the string "username:p@ssword" should be treated as valid userinfo.
+			// Ref:
+			//   https://go.dev/issue/3439
+			//   https://go.dev/issue/22655
 			continue
 		default:
 			return false

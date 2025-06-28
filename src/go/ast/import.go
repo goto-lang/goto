@@ -33,11 +33,11 @@ func SortImports(fset *token.FileSet, f *File) {
 		for j, s := range d.Specs {
 			if j > i && lineAt(fset, s.Pos()) > 1+lineAt(fset, d.Specs[j-1].End()) {
 				// j begins a new run. End this one.
-				specs = append(specs, sortSpecs(fset, f, d.Specs[i:j])...)
+				specs = append(specs, sortSpecs(fset, f, d, d.Specs[i:j])...)
 				i = j
 			}
 		}
-		specs = append(specs, sortSpecs(fset, f, d.Specs[i:])...)
+		specs = append(specs, sortSpecs(fset, f, d, d.Specs[i:])...)
 		d.Specs = specs
 
 		// Deduping can leave a blank line before the rparen; clean that up.
@@ -48,6 +48,16 @@ func SortImports(fset *token.FileSet, f *File) {
 			for rParenLine > lastLine+1 {
 				rParenLine--
 				fset.File(d.Rparen).MergeLine(rParenLine)
+			}
+		}
+	}
+
+	// Make File.Imports order consistent.
+	f.Imports = f.Imports[:0]
+	for _, decl := range f.Decls {
+		if decl, ok := decl.(*GenDecl); ok && decl.Tok == token.IMPORT {
+			for _, spec := range decl.Specs {
+				f.Imports = append(f.Imports, spec.(*ImportSpec))
 			}
 		}
 	}
@@ -99,7 +109,7 @@ type cgPos struct {
 	cg   *CommentGroup
 }
 
-func sortSpecs(fset *token.FileSet, f *File, specs []Spec) []Spec {
+func sortSpecs(fset *token.FileSet, f *File, d *GenDecl, specs []Spec) []Spec {
 	// Can't short-circuit here even if specs are already sorted,
 	// since they might yet need deduplication.
 	// A lone import, however, may be safely ignored.
@@ -197,7 +207,11 @@ func sortSpecs(fset *token.FileSet, f *File, specs []Spec) []Spec {
 			deduped = append(deduped, s)
 		} else {
 			p := s.Pos()
-			fset.File(p).MergeLine(lineAt(fset, p))
+			// This function is exited early when len(specs) <= 1,
+			// so d.Rparen must be populated (d.Rparen.IsValid() == true).
+			if l := lineAt(fset, p); l != lineAt(fset, d.Rparen) {
+				fset.File(p).MergeLine(l)
+			}
 		}
 	}
 	specs = deduped

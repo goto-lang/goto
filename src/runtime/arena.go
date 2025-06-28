@@ -86,8 +86,8 @@ import (
 	"internal/abi"
 	"internal/goarch"
 	"internal/runtime/atomic"
-	"runtime/internal/math"
-	"runtime/internal/sys"
+	"internal/runtime/math"
+	"internal/runtime/sys"
 	"unsafe"
 )
 
@@ -554,13 +554,7 @@ func userArenaHeapBitsSetType(typ *_type, ptr unsafe.Pointer, s *mspan) {
 	base := s.base()
 	h := s.writeUserArenaHeapBits(uintptr(ptr))
 
-	p := typ.GCData // start of 1-bit pointer mask (or GC program)
-	var gcProgBits uintptr
-	if typ.Kind_&abi.KindGCProg != 0 {
-		// Expand gc program, using the object itself for storage.
-		gcProgBits = runGCProg(addb(p, 4), (*byte)(ptr))
-		p = (*byte)(ptr)
-	}
+	p := getGCMask(typ) // start of 1-bit pointer mask
 	nb := typ.PtrBytes / goarch.PtrSize
 
 	for i := uintptr(0); i < nb; i += ptrBits {
@@ -584,11 +578,6 @@ func userArenaHeapBitsSetType(typ *_type, ptr unsafe.Pointer, s *mspan) {
 	// are always fully cleared when reused.
 	h = h.pad(s, typ.Size_-typ.PtrBytes)
 	h.flush(s, uintptr(ptr), typ.Size_)
-
-	if typ.Kind_&abi.KindGCProg != 0 {
-		// Zero out temporary ptrmask buffer inside object.
-		memclrNoHeapPointers(ptr, (gcProgBits+7)/8)
-	}
 
 	// Update the PtrBytes value in the type information. After this
 	// point, the GC will observe the new bitmap.
@@ -798,11 +787,8 @@ func newUserArenaChunk() (unsafe.Pointer, *mspan) {
 
 	if asanenabled {
 		// TODO(mknyszek): Track individual objects.
-		rzSize := computeRZlog(span.elemsize)
-		span.elemsize -= rzSize
-		span.largeType.Size_ = span.elemsize
+		// N.B. span.elemsize includes a redzone already.
 		rzStart := span.base() + span.elemsize
-		span.userArenaChunkFree = makeAddrRange(span.base(), rzStart)
 		asanpoison(unsafe.Pointer(rzStart), span.limit-rzStart)
 		asanunpoison(unsafe.Pointer(span.base()), span.elemsize)
 	}
@@ -813,8 +799,8 @@ func newUserArenaChunk() (unsafe.Pointer, *mspan) {
 			throw("newUserArenaChunk called without a P or outside bootstrapping")
 		}
 		// Note cache c only valid while m acquired; see #47302
-		if rate != 1 && userArenaChunkBytes < c.nextSample {
-			c.nextSample -= userArenaChunkBytes
+		if rate != 1 && int64(userArenaChunkBytes) < c.nextSample {
+			c.nextSample -= int64(userArenaChunkBytes)
 		} else {
 			profilealloc(mp, unsafe.Pointer(span.base()), userArenaChunkBytes)
 		}
@@ -964,6 +950,9 @@ func freeUserArenaChunk(s *mspan, x unsafe.Pointer) {
 	if asanenabled {
 		asanpoison(unsafe.Pointer(s.base()), s.elemsize)
 	}
+	if valgrindenabled {
+		valgrindFree(unsafe.Pointer(s.base()))
+	}
 
 	// Make ourselves non-preemptible as we manipulate state and statistics.
 	//
@@ -1022,7 +1011,7 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 			// is mapped contiguously.
 			hintList = &h.arenaHints
 		}
-		v, size := h.sysAlloc(userArenaChunkBytes, hintList, false)
+		v, size := h.sysAlloc(userArenaChunkBytes, hintList, &mheap_.userArenaArenas)
 		if size%userArenaChunkBytes != 0 {
 			throw("sysAlloc size is not divisible by userArenaChunkBytes")
 		}
@@ -1055,7 +1044,7 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 	//
 	// Unlike (*mheap).grow, just map in everything that we
 	// asked for. We're likely going to use it all.
-	sysMap(unsafe.Pointer(base), userArenaChunkBytes, &gcController.heapReleased)
+	sysMap(unsafe.Pointer(base), userArenaChunkBytes, &gcController.heapReleased, "user arena chunk")
 	sysUsed(unsafe.Pointer(base), userArenaChunkBytes, userArenaChunkBytes)
 
 	// Model the user arena as a heap span for a large object.
@@ -1063,9 +1052,22 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 	h.initSpan(s, spanAllocHeap, spc, base, userArenaChunkPages)
 	s.isUserArenaChunk = true
 	s.elemsize -= userArenaChunkReserveBytes()
-	s.limit = s.base() + s.elemsize
 	s.freeindex = 1
 	s.allocCount = 1
+
+	// Adjust s.limit down to the object-containing part of the span.
+	//
+	// This is just to create a slightly tighter bound on the limit.
+	// It's totally OK if the garbage collector, in particular
+	// conservative scanning, can temporarily observes an inflated
+	// limit. It will simply mark the whole chunk or just skip it
+	// since we're in the mark phase anyway.
+	s.limit = s.base() + s.elemsize
+
+	// Adjust size to include redzone.
+	if asanenabled {
+		s.elemsize -= redZoneSize(s.elemsize)
+	}
 
 	// Account for this new arena chunk memory.
 	gcController.heapInUse.add(int64(userArenaChunkBytes))
@@ -1088,7 +1090,7 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 
 	// This must clear the entire heap bitmap so that it's safe
 	// to allocate noscan data without writing anything out.
-	s.initHeapBits(true)
+	s.initHeapBits()
 
 	// Clear the span preemptively. It's an arena chunk, so let's assume
 	// everything is going to be used.

@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash"
 	"hash/crc32"
 	"internal/godebug"
@@ -804,6 +805,9 @@ func toValidName(name string) string {
 
 func (r *Reader) initFileList() {
 	r.fileListOnce.Do(func() {
+		// Preallocate the minimum size of the index.
+		// We may also synthesize additional directory entries.
+		r.fileList = make([]fileListEntry, 0, len(r.File))
 		// files and knownDirs map from a file/directory name
 		// to an index into the r.fileList entry that we are
 		// building. They are used to mark duplicate entries.
@@ -902,14 +906,8 @@ func (r *Reader) Open(name string) (fs.File, error) {
 }
 
 func split(name string) (dir, elem string, isDir bool) {
-	if len(name) > 0 && name[len(name)-1] == '/' {
-		isDir = true
-		name = name[:len(name)-1]
-	}
-	i := len(name) - 1
-	for i >= 0 && name[i] != '/' {
-		i--
-	}
+	name, isDir = strings.CutSuffix(name, "/")
+	i := strings.LastIndexByte(name, '/')
 	if i < 0 {
 		return ".", name, isDir
 	}
@@ -991,6 +989,12 @@ func (d *openDir) ReadDir(count int) ([]fs.DirEntry, error) {
 		s, err := d.files[d.offset+i].stat()
 		if err != nil {
 			return nil, err
+		} else if s.Name() == "." || !fs.ValidPath(s.Name()) {
+			return nil, &fs.PathError{
+				Op:   "readdir",
+				Path: d.e.name,
+				Err:  fmt.Errorf("invalid file name: %v", d.files[d.offset+i].name),
+			}
 		}
 		list[i] = s
 	}

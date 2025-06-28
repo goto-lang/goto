@@ -14,14 +14,47 @@ import (
 // Public race detection API, present iff build with -race.
 
 func RaceRead(addr unsafe.Pointer)
+
+//go:linkname race_Read internal/race.Read
+//go:nosplit
+func race_Read(addr unsafe.Pointer) {
+	RaceRead(addr)
+}
+
 func RaceWrite(addr unsafe.Pointer)
+
+//go:linkname race_Write internal/race.Write
+//go:nosplit
+func race_Write(addr unsafe.Pointer) {
+	RaceWrite(addr)
+}
+
 func RaceReadRange(addr unsafe.Pointer, len int)
+
+//go:linkname race_ReadRange internal/race.ReadRange
+//go:nosplit
+func race_ReadRange(addr unsafe.Pointer, len int) {
+	RaceReadRange(addr, len)
+}
+
 func RaceWriteRange(addr unsafe.Pointer, len int)
+
+//go:linkname race_WriteRange internal/race.WriteRange
+//go:nosplit
+func race_WriteRange(addr unsafe.Pointer, len int) {
+	RaceWriteRange(addr, len)
+}
 
 func RaceErrors() int {
 	var n uint64
 	racecall(&__tsan_report_count, uintptr(unsafe.Pointer(&n)), 0, 0, 0)
 	return int(n)
+}
+
+//go:linkname race_Errors internal/race.Errors
+//go:nosplit
+func race_Errors() int {
+	return RaceErrors()
 }
 
 // RaceAcquire/RaceRelease/RaceReleaseMerge establish happens-before relations
@@ -38,6 +71,12 @@ func RaceAcquire(addr unsafe.Pointer) {
 	raceacquire(addr)
 }
 
+//go:linkname race_Acquire internal/race.Acquire
+//go:nosplit
+func race_Acquire(addr unsafe.Pointer) {
+	RaceAcquire(addr)
+}
+
 // RaceRelease performs a release operation on addr that
 // can synchronize with a later RaceAcquire on addr.
 //
@@ -49,6 +88,12 @@ func RaceRelease(addr unsafe.Pointer) {
 	racerelease(addr)
 }
 
+//go:linkname race_Release internal/race.Release
+//go:nosplit
+func race_Release(addr unsafe.Pointer) {
+	RaceRelease(addr)
+}
+
 // RaceReleaseMerge is like RaceRelease, but also establishes a happens-before
 // relation with the preceding RaceRelease or RaceReleaseMerge on addr.
 //
@@ -58,6 +103,12 @@ func RaceRelease(addr unsafe.Pointer) {
 //go:nosplit
 func RaceReleaseMerge(addr unsafe.Pointer) {
 	racereleasemerge(addr)
+}
+
+//go:linkname race_ReleaseMerge internal/race.ReleaseMerge
+//go:nosplit
+func race_ReleaseMerge(addr unsafe.Pointer) {
+	RaceReleaseMerge(addr)
 }
 
 // RaceDisable disables handling of race synchronization events in the current goroutine.
@@ -74,6 +125,12 @@ func RaceDisable() {
 	gp.raceignore++
 }
 
+//go:linkname race_Disable internal/race.Disable
+//go:nosplit
+func race_Disable() {
+	RaceDisable()
+}
+
 // RaceEnable re-enables handling of race events in the current goroutine.
 //
 //go:nosplit
@@ -83,6 +140,12 @@ func RaceEnable() {
 	if gp.raceignore == 0 {
 		racecall(&__tsan_go_ignore_sync_end, gp.racectx, 0, 0, 0)
 	}
+}
+
+//go:linkname race_Enable internal/race.Enable
+//go:nosplit
+func race_Enable() {
+	RaceEnable()
 }
 
 // Private interface for the runtime.
@@ -105,6 +168,11 @@ func raceReadObjectPC(t *_type, addr unsafe.Pointer, callerpc, pc uintptr) {
 	}
 }
 
+//go:linkname race_ReadObjectPC internal/race.ReadObjectPC
+func race_ReadObjectPC(t *abi.Type, addr unsafe.Pointer, callerpc, pc uintptr) {
+	raceReadObjectPC(t, addr, callerpc, pc)
+}
+
 func raceWriteObjectPC(t *_type, addr unsafe.Pointer, callerpc, pc uintptr) {
 	kind := t.Kind_ & abi.KindMask
 	if kind == abi.Array || kind == abi.Struct {
@@ -118,11 +186,26 @@ func raceWriteObjectPC(t *_type, addr unsafe.Pointer, callerpc, pc uintptr) {
 	}
 }
 
+//go:linkname race_WriteObjectPC internal/race.WriteObjectPC
+func race_WriteObjectPC(t *abi.Type, addr unsafe.Pointer, callerpc, pc uintptr) {
+	raceWriteObjectPC(t, addr, callerpc, pc)
+}
+
 //go:noescape
 func racereadpc(addr unsafe.Pointer, callpc, pc uintptr)
 
 //go:noescape
 func racewritepc(addr unsafe.Pointer, callpc, pc uintptr)
+
+//go:linkname race_ReadPC internal/race.ReadPC
+func race_ReadPC(addr unsafe.Pointer, callerpc, pc uintptr) {
+	racereadpc(addr, callerpc, pc)
+}
+
+//go:linkname race_WritePC internal/race.WritePC
+func race_WritePC(addr unsafe.Pointer, callerpc, pc uintptr) {
+	racewritepc(addr, callerpc, pc)
+}
 
 type symbolizeCodeContext struct {
 	pc   uintptr
@@ -372,7 +455,6 @@ func raceinit() (gctx, pctx uintptr) {
 
 	racecall(&__tsan_init, uintptr(unsafe.Pointer(&gctx)), uintptr(unsafe.Pointer(&pctx)), abi.FuncPCABI0(racecallbackthunk), 0)
 
-	// Round data segment to page boundaries, because it's used in mmap().
 	start := ^uintptr(0)
 	end := uintptr(0)
 	if start > firstmoduledata.noptrdata {
@@ -399,10 +481,13 @@ func raceinit() (gctx, pctx uintptr) {
 	if end < firstmoduledata.ebss {
 		end = firstmoduledata.ebss
 	}
-	size := alignUp(end-start, _PageSize)
-	racecall(&__tsan_map_shadow, start, size, 0, 0)
+	// Use exact bounds for boundary check in racecalladdr. See issue 73483.
 	racedatastart = start
-	racedataend = start + size
+	racedataend = end
+	// Round data segment to page boundaries for race detector (TODO: still needed?)
+	start = alignDown(start, _PageSize)
+	end = alignUp(end, _PageSize)
+	racecall(&__tsan_map_shadow, start, end-start, 0, 0)
 
 	return
 }
@@ -479,6 +564,13 @@ func racegostart(pc uintptr) uintptr {
 //go:nosplit
 func racegoend() {
 	racecall(&__tsan_go_end, getg().racectx, 0, 0, 0)
+}
+
+//go:nosplit
+func racectxstart(pc, spawnctx uintptr) uintptr {
+	var racectx uintptr
+	racecall(&__tsan_go_start, spawnctx, uintptr(unsafe.Pointer(&racectx)), pc, 0)
+	return racectx
 }
 
 //go:nosplit

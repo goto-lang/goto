@@ -5,6 +5,7 @@
 package telemetry
 
 import (
+	"go/version"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -26,7 +27,7 @@ func IsToolchainProgram(progPath string) bool {
 // special characters.
 func ProgramInfo(info *debug.BuildInfo) (goVers, progPath, progVers string) {
 	goVers = info.GoVersion
-	if strings.Contains(goVers, "devel") || strings.Contains(goVers, "-") {
+	if strings.Contains(goVers, "devel") || strings.Contains(goVers, "-") || !version.IsValid(goVers) {
 		goVers = "devel"
 	}
 

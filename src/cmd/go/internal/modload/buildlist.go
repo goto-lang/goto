@@ -21,7 +21,7 @@ import (
 	"cmd/go/internal/cfg"
 	"cmd/go/internal/gover"
 	"cmd/go/internal/mvs"
-	"cmd/go/internal/par"
+	"cmd/internal/par"
 
 	"golang.org/x/mod/module"
 )
@@ -590,7 +590,7 @@ func LoadModGraph(ctx context.Context, goVersion string) (*ModuleGraph, error) {
 		return nil, err
 	}
 	requirements = rs
-	return mg, err
+	return mg, nil
 }
 
 // expandGraph loads the complete module graph from rs.
@@ -655,7 +655,7 @@ func EditBuildList(ctx context.Context, add, mustSelect []module.Version) (chang
 		return false, err
 	}
 	requirements = rs
-	return changed, err
+	return changed, nil
 }
 
 // OverrideRoots edits the global requirement roots by replacing the specific module versions.
@@ -1222,7 +1222,7 @@ func updatePrunedRoots(ctx context.Context, direct map[string]bool, rs *Requirem
 				return rs, nil
 			}
 			// The root set has converged: every root going into this iteration was
-			// already at its selected version, although we have have removed other
+			// already at its selected version, although we have removed other
 			// (redundant) roots for the same path.
 			break
 		}
@@ -1281,7 +1281,7 @@ func spotCheckRoots(ctx context.Context, rs *Requirements, mods map[module.Versi
 // module in direct as a root.
 func tidyUnprunedRoots(ctx context.Context, mainModule module.Version, old *Requirements, pkgs []*loadPkg) (*Requirements, error) {
 	var (
-		// keep is a set of of modules that provide packages or are needed to
+		// keep is a set of modules that provide packages or are needed to
 		// disambiguate imports.
 		keep     []module.Version
 		keptPath = map[string]bool{}

@@ -8,13 +8,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"internal/obscuretestdata"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1274,10 +1275,53 @@ func TestFSWalk(t *testing.T) {
 			} else if !test.wantErr && sawErr {
 				t.Error("unexpected error")
 			}
-			if test.want != nil && !reflect.DeepEqual(files, test.want) {
+			if test.want != nil && !slices.Equal(files, test.want) {
 				t.Errorf("got %v want %v", files, test.want)
 			}
 		})
+	}
+}
+
+func TestFSWalkBadFile(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	zw := NewWriter(&buf)
+	hdr := &FileHeader{Name: "."}
+	hdr.SetMode(fs.ModeDir | 0o755)
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatalf("create zip header: %v", err)
+	}
+	_, err = w.Write([]byte("some data"))
+	if err != nil {
+		t.Fatalf("write zip contents: %v", err)
+
+	}
+	err = zw.Close()
+	if err != nil {
+		t.Fatalf("close zip writer: %v", err)
+
+	}
+
+	zr, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("create zip reader: %v", err)
+
+	}
+	var count int
+	var errRepeat = errors.New("repeated call to path")
+	err = fs.WalkDir(zr, ".", func(p string, d fs.DirEntry, err error) error {
+		count++
+		if count > 2 { // once for directory read, once for the error
+			return errRepeat
+		}
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected error from invalid file name")
+	} else if errors.Is(err, errRepeat) {
+		t.Fatal(err)
 	}
 }
 
@@ -1580,7 +1624,7 @@ func TestCVE202141772(t *testing.T) {
 			t.Errorf("Opening %q with fs.FS API succeeded", f.Name)
 		}
 	}
-	if !reflect.DeepEqual(names, entryNames) {
+	if !slices.Equal(names, entryNames) {
 		t.Errorf("Unexpected file entries: %q", names)
 	}
 	if _, err := r.Open(""); err == nil {
@@ -1693,7 +1737,7 @@ func TestInsecurePaths(t *testing.T) {
 		for _, f := range zr.File {
 			gotPaths = append(gotPaths, f.Name)
 		}
-		if !reflect.DeepEqual(gotPaths, []string{path}) {
+		if !slices.Equal(gotPaths, []string{path}) {
 			t.Errorf("NewReader for archive with file %q: got files %q", path, gotPaths)
 			continue
 		}
@@ -1718,7 +1762,7 @@ func TestDisableInsecurePathCheck(t *testing.T) {
 	for _, f := range zr.File {
 		gotPaths = append(gotPaths, f.Name)
 	}
-	if want := []string{name}; !reflect.DeepEqual(gotPaths, want) {
+	if want := []string{name}; !slices.Equal(gotPaths, want) {
 		t.Errorf("NewReader with zipinsecurepath=1: got files %q, want %q", gotPaths, want)
 	}
 }

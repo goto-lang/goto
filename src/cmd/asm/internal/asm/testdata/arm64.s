@@ -1777,6 +1777,7 @@ next:
 	MSR	R17, ZCR_EL1                       // 111218d5
 	SYS	$32768, R1                         // 018008d5
 	SYS	$32768                             // 1f8008d5
+	MSR	$1, DIT                            // 5f4103d5
 
 // TLBI instruction
 	TLBI	VMALLE1IS                          // 1f8308d5
@@ -1887,4 +1888,10 @@ next:
 	DC	CIGDVAC, R25                       // b97e0bd5
 	DC	CVAP, R26                          // 3a7c0bd5
 	DC	CVADP, R27                         // 3b7d0bd5
+
+// Branch Target Identification
+	BTI	C                                  // 5f2403d5
+	BTI	J                                  // 9f2403d5
+	BTI	JC                                 // df2403d5
+
 	END

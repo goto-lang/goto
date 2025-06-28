@@ -1,7 +1,12 @@
+// Copyright 2024 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package tls
 
 import (
 	"bytes"
+	"crypto/internal/cryptotest"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -14,12 +19,14 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/cryptobyte"
 )
 
 var (
@@ -28,8 +35,10 @@ var (
 
 	isHandshakerSupported = flag.Bool("is-handshaker-supported", false, "")
 
-	keyfile  = flag.String("key-file", "", "")
-	certfile = flag.String("cert-file", "", "")
+	keyfile      = flag.String("key-file", "", "")
+	certfile     = flag.String("cert-file", "", "")
+	ocspResponse = flagBase64("ocsp-response", "")
+	signingPrefs = flagIntSlice("signing-prefs", "")
 
 	trustCert = flag.String("trust-cert", "", "")
 
@@ -48,13 +57,17 @@ var (
 
 	resumeCount = flag.Int("resume-count", 0, "")
 
-	curves        = flagStringSlice("curves", "")
+	curves        = flagIntSlice("curves", "")
 	expectedCurve = flag.String("expect-curve-id", "", "")
+
+	verifyPrefs        = flagIntSlice("verify-prefs", "")
+	expectedSigAlg     = flag.String("expect-peer-signature-algorithm", "", "")
+	expectedPeerSigAlg = flagIntSlice("expect-peer-verify-pref", "")
 
 	shimID = flag.Uint64("shim-id", 0, "")
 	_      = flag.Bool("ipv6", false, "")
 
-	echConfigListB64           = flag.String("ech-config-list", "", "")
+	echConfigList              = flagBase64("ech-config-list", "")
 	expectECHAccepted          = flag.Bool("expect-ech-accept", false, "")
 	expectHRR                  = flag.Bool("expect-hrr", false, "")
 	expectNoHRR                = flag.Bool("expect-no-hrr", false, "")
@@ -64,44 +77,96 @@ var (
 	_                          = flag.Bool("expect-no-ech-name-override", false, "")
 	_                          = flag.String("expect-ech-name-override", "", "")
 	_                          = flag.Bool("reverify-on-resume", false, "")
-	onResumeECHConfigListB64   = flag.String("on-resume-ech-config-list", "", "")
+	onResumeECHConfigList      = flagBase64("on-resume-ech-config-list", "")
 	_                          = flag.Bool("on-resume-expect-reject-early-data", false, "")
 	onResumeExpectECHAccepted  = flag.Bool("on-resume-expect-ech-accept", false, "")
 	_                          = flag.Bool("on-resume-expect-no-ech-name-override", false, "")
 	expectedServerName         = flag.String("expect-server-name", "", "")
+	echServerConfig            = flagStringSlice("ech-server-config", "")
+	echServerKey               = flagStringSlice("ech-server-key", "")
+	echServerRetryConfig       = flagStringSlice("ech-is-retry-config", "")
 
 	expectSessionMiss = flag.Bool("expect-session-miss", false, "")
 
-	_                       = flag.Bool("enable-early-data", false, "")
-	_                       = flag.Bool("on-resume-expect-accept-early-data", false, "")
-	_                       = flag.Bool("expect-ticket-supports-early-data", false, "")
-	onResumeShimWritesFirst = flag.Bool("on-resume-shim-writes-first", false, "")
+	_ = flag.Bool("enable-early-data", false, "")
+	_ = flag.Bool("on-resume-expect-accept-early-data", false, "")
+	_ = flag.Bool("expect-ticket-supports-early-data", false, "")
+	_ = flag.Bool("on-resume-shim-writes-first", false, "")
 
-	advertiseALPN = flag.String("advertise-alpn", "", "")
-	expectALPN    = flag.String("expect-alpn", "", "")
-	rejectALPN    = flag.Bool("reject-alpn", false, "")
-	declineALPN   = flag.Bool("decline-alpn", false, "")
+	advertiseALPN        = flag.String("advertise-alpn", "", "")
+	expectALPN           = flag.String("expect-alpn", "", "")
+	rejectALPN           = flag.Bool("reject-alpn", false, "")
+	declineALPN          = flag.Bool("decline-alpn", false, "")
+	expectAdvertisedALPN = flag.String("expect-advertised-alpn", "", "")
+	selectALPN           = flag.String("select-alpn", "", "")
 
 	hostName = flag.String("host-name", "", "")
 
 	verifyPeer = flag.Bool("verify-peer", false, "")
 	_          = flag.Bool("use-custom-verify-callback", false, "")
+
+	waitForDebugger = flag.Bool("wait-for-debugger", false, "")
 )
 
 type stringSlice []string
 
 func flagStringSlice(name, usage string) *stringSlice {
-	f := &stringSlice{}
+	f := new(stringSlice)
 	flag.Var(f, name, usage)
 	return f
 }
 
-func (saf stringSlice) String() string {
-	return strings.Join(saf, ",")
+func (saf *stringSlice) String() string {
+	return strings.Join(*saf, ",")
 }
 
-func (saf stringSlice) Set(s string) error {
-	saf = append(saf, s)
+func (saf *stringSlice) Set(s string) error {
+	*saf = append(*saf, s)
+	return nil
+}
+
+type intSlice []int64
+
+func flagIntSlice(name, usage string) *intSlice {
+	f := new(intSlice)
+	flag.Var(f, name, usage)
+	return f
+}
+
+func (sf *intSlice) String() string {
+	return strings.Join(strings.Split(fmt.Sprint(*sf), " "), ",")
+}
+
+func (sf *intSlice) Set(s string) error {
+	i, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return err
+	}
+	*sf = append(*sf, i)
+	return nil
+}
+
+type base64Flag []byte
+
+func flagBase64(name, usage string) *base64Flag {
+	f := new(base64Flag)
+	flag.Var(f, name, usage)
+	return f
+}
+
+func (f *base64Flag) String() string {
+	return base64.StdEncoding.EncodeToString(*f)
+}
+
+func (f *base64Flag) Set(s string) error {
+	if *f != nil {
+		return fmt.Errorf("multiple base64 values not supported")
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return err
+	}
+	*f = b
 	return nil
 }
 
@@ -111,6 +176,14 @@ func bogoShim() {
 		return
 	}
 
+	fmt.Printf("BoGo shim flags: %q", os.Args[1:])
+
+	// Test with both the default and insecure cipher suites.
+	var ciphersuites []uint16
+	for _, s := range append(CipherSuites(), InsecureCipherSuites()...) {
+		ciphersuites = append(ciphersuites, s.ID)
+	}
+
 	cfg := &Config{
 		ServerName: "test",
 
@@ -118,6 +191,31 @@ func bogoShim() {
 		MaxVersion: uint16(*maxVersion),
 
 		ClientSessionCache: NewLRUClientSessionCache(0),
+
+		CipherSuites: ciphersuites,
+
+		GetConfigForClient: func(chi *ClientHelloInfo) (*Config, error) {
+
+			if *expectAdvertisedALPN != "" {
+
+				s := cryptobyte.String(*expectAdvertisedALPN)
+
+				var expectedALPNs []string
+
+				for !s.Empty() {
+					var alpn cryptobyte.String
+					if !s.ReadUint8LengthPrefixed(&alpn) {
+						return nil, fmt.Errorf("unexpected error while parsing arguments for -expect-advertised-alpn")
+					}
+					expectedALPNs = append(expectedALPNs, string(alpn))
+				}
+
+				if !slices.Equal(chi.SupportedProtos, expectedALPNs) {
+					return nil, fmt.Errorf("unexpected ALPN: got %q, want %q", chi.SupportedProtos, expectedALPNs)
+				}
+			}
+			return nil, nil
+		},
 	}
 
 	if *noTLS1 {
@@ -160,6 +258,9 @@ func bogoShim() {
 	if *declineALPN {
 		cfg.NextProtos = []string{}
 	}
+	if *selectALPN != "" {
+		cfg.NextProtos = []string{*selectALPN}
+	}
 
 	if *hostName != "" {
 		cfg.ServerName = *hostName
@@ -170,7 +271,39 @@ func bogoShim() {
 		if err != nil {
 			log.Fatalf("load key-file err: %s", err)
 		}
-		cfg.Certificates = []Certificate{pair}
+		for _, id := range *signingPrefs {
+			pair.SupportedSignatureAlgorithms = append(pair.SupportedSignatureAlgorithms, SignatureScheme(id))
+		}
+		pair.OCSPStaple = *ocspResponse
+		// Use Get[Client]Certificate to force the use of the certificate, which
+		// more closely matches the BoGo expectations (e.g. handshake failure if
+		// no client certificates are compatible).
+		cfg.GetCertificate = func(chi *ClientHelloInfo) (*Certificate, error) {
+			if *expectedPeerSigAlg != nil {
+				if len(chi.SignatureSchemes) != len(*expectedPeerSigAlg) {
+					return nil, fmt.Errorf("unexpected signature algorithms: got %s, want %v", chi.SignatureSchemes, *expectedPeerSigAlg)
+				}
+				for i := range *expectedPeerSigAlg {
+					if chi.SignatureSchemes[i] != SignatureScheme((*expectedPeerSigAlg)[i]) {
+						return nil, fmt.Errorf("unexpected signature algorithms: got %s, want %v", chi.SignatureSchemes, *expectedPeerSigAlg)
+					}
+				}
+			}
+			return &pair, nil
+		}
+		cfg.GetClientCertificate = func(cri *CertificateRequestInfo) (*Certificate, error) {
+			if *expectedPeerSigAlg != nil {
+				if len(cri.SignatureSchemes) != len(*expectedPeerSigAlg) {
+					return nil, fmt.Errorf("unexpected signature algorithms: got %s, want %v", cri.SignatureSchemes, *expectedPeerSigAlg)
+				}
+				for i := range *expectedPeerSigAlg {
+					if cri.SignatureSchemes[i] != SignatureScheme((*expectedPeerSigAlg)[i]) {
+						return nil, fmt.Errorf("unexpected signature algorithms: got %s, want %v", cri.SignatureSchemes, *expectedPeerSigAlg)
+					}
+				}
+			}
+			return &pair, nil
+		}
 	}
 	if *trustCert != "" {
 		pool := x509.NewCertPool()
@@ -194,32 +327,49 @@ func bogoShim() {
 		cfg.ClientAuth = VerifyClientCertIfGiven
 	}
 
-	if *echConfigListB64 != "" {
-		echConfigList, err := base64.StdEncoding.DecodeString(*echConfigListB64)
-		if err != nil {
-			log.Fatalf("parse ech-config-list err: %s", err)
-		}
-		cfg.EncryptedClientHelloConfigList = echConfigList
+	if *echConfigList != nil {
+		cfg.EncryptedClientHelloConfigList = *echConfigList
 		cfg.MinVersion = VersionTLS13
 	}
 
-	if len(*curves) != 0 {
-		for _, curveStr := range *curves {
-			id, err := strconv.Atoi(curveStr)
-			if err != nil {
-				log.Fatalf("failed to parse curve id %q: %s", curveStr, err)
-			}
+	if *curves != nil {
+		for _, id := range *curves {
 			cfg.CurvePreferences = append(cfg.CurvePreferences, CurveID(id))
 		}
 	}
 
-	for i := 0; i < *resumeCount+1; i++ {
-		if i > 0 && (*onResumeECHConfigListB64 != "") {
-			echConfigList, err := base64.StdEncoding.DecodeString(*onResumeECHConfigListB64)
+	if *verifyPrefs != nil {
+		for _, id := range *verifyPrefs {
+			testingOnlySupportedSignatureAlgorithms = append(testingOnlySupportedSignatureAlgorithms, SignatureScheme(id))
+		}
+	}
+
+	if *echServerConfig != nil {
+		if len(*echServerConfig) != len(*echServerKey) || len(*echServerConfig) != len(*echServerRetryConfig) {
+			log.Fatal("-ech-server-config, -ech-server-key, and -ech-is-retry-config mismatch")
+		}
+
+		for i, c := range *echServerConfig {
+			configBytes, err := base64.StdEncoding.DecodeString(c)
 			if err != nil {
-				log.Fatalf("parse ech-config-list err: %s", err)
+				log.Fatalf("parse ech-server-config err: %s", err)
 			}
-			cfg.EncryptedClientHelloConfigList = echConfigList
+			privBytes, err := base64.StdEncoding.DecodeString((*echServerKey)[i])
+			if err != nil {
+				log.Fatalf("parse ech-server-key err: %s", err)
+			}
+
+			cfg.EncryptedClientHelloKeys = append(cfg.EncryptedClientHelloKeys, EncryptedClientHelloKey{
+				Config:      configBytes,
+				PrivateKey:  privBytes,
+				SendAsRetry: (*echServerRetryConfig)[i] == "1",
+			})
+		}
+	}
+
+	for i := 0; i < *resumeCount+1; i++ {
+		if i > 0 && *onResumeECHConfigList != nil {
+			cfg.EncryptedClientHelloConfigList = *onResumeECHConfigList
 		}
 
 		conn, err := net.Dial("tcp", net.JoinHostPort("localhost", *port))
@@ -230,7 +380,7 @@ func bogoShim() {
 
 		// Write the shim ID we were passed as a little endian uint64
 		shimIDBytes := make([]byte, 8)
-		byteorder.LePutUint64(shimIDBytes, *shimID)
+		byteorder.LEPutUint64(shimIDBytes, *shimID)
 		if _, err := conn.Write(shimIDBytes); err != nil {
 			log.Fatalf("failed to write shim id: %s", err)
 		}
@@ -248,6 +398,12 @@ func bogoShim() {
 			}
 		}
 
+		// If we were instructed to wait for a debugger, then send SIGSTOP to ourselves.
+		// When the debugger attaches it will continue the process.
+		if *waitForDebugger {
+			pauseProcess()
+		}
+
 		for {
 			buf := make([]byte, 500)
 			var n int
@@ -263,10 +419,10 @@ func bogoShim() {
 				break
 			}
 		}
-		if err != nil && err != io.EOF {
+		if err != io.EOF {
 			retryErr, ok := err.(*ECHRejectionError)
 			if !ok {
-				log.Fatalf("unexpected error type returned: %v", err)
+				log.Fatal(err)
 			}
 			if *expectNoECHRetryConfigs && len(retryErr.RetryConfigList) > 0 {
 				log.Fatalf("expected no ECH retry configs, got some")
@@ -288,6 +444,11 @@ func bogoShim() {
 			if *expectALPN != "" && cs.NegotiatedProtocol != *expectALPN {
 				log.Fatalf("unexpected protocol negotiated: want %q, got %q", *expectALPN, cs.NegotiatedProtocol)
 			}
+
+			if *selectALPN != "" && cs.NegotiatedProtocol != *selectALPN {
+				log.Fatalf("unexpected protocol negotiated: want %q, got %q", *selectALPN, cs.NegotiatedProtocol)
+			}
+
 			if *expectVersion != 0 && cs.Version != uint16(*expectVersion) {
 				log.Fatalf("expected ssl version %q, got %q", uint16(*expectVersion), cs.Version)
 			}
@@ -326,25 +487,32 @@ func bogoShim() {
 			if err != nil {
 				log.Fatalf("failed to parse -expect-curve-id: %s", err)
 			}
-			if tlsConn.curveID != CurveID(expectedCurveID) {
+			if cs.CurveID != CurveID(expectedCurveID) {
 				log.Fatalf("unexpected curve id: want %d, got %d", expectedCurveID, tlsConn.curveID)
+			}
+		}
+
+		// TODO: implement testingOnlyPeerSignatureAlgorithm on resumption.
+		if *expectedSigAlg != "" && !cs.DidResume {
+			expectedSigAlgID, err := strconv.Atoi(*expectedSigAlg)
+			if err != nil {
+				log.Fatalf("failed to parse -expect-peer-signature-algorithm: %s", err)
+			}
+			if cs.testingOnlyPeerSignatureAlgorithm != SignatureScheme(expectedSigAlgID) {
+				log.Fatalf("unexpected peer signature algorithm: want %s, got %s", SignatureScheme(expectedSigAlgID), cs.testingOnlyPeerSignatureAlgorithm)
 			}
 		}
 	}
 }
 
 func TestBogoSuite(t *testing.T) {
-	testenv.SkipIfShortAndSlow(t)
-	testenv.MustHaveExternalNetwork(t)
-	testenv.MustHaveGoRun(t)
-	testenv.MustHaveExec(t)
-
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	if testenv.Builder() != "" && runtime.GOOS == "windows" {
 		t.Skip("#66913: windows network connections are flakey on builders")
 	}
+	skipFIPS(t)
 
 	// In order to make Go test caching work as expected, we stat the
 	// bogo_config.json file, so that the Go testing hooks know that it is
@@ -358,18 +526,8 @@ func TestBogoSuite(t *testing.T) {
 	if *bogoLocalDir != "" {
 		bogoDir = *bogoLocalDir
 	} else {
-		const boringsslModVer = "v0.0.0-20240523173554-273a920f84e8"
-		output, err := exec.Command("go", "mod", "download", "-json", "boringssl.googlesource.com/boringssl.git@"+boringsslModVer).CombinedOutput()
-		if err != nil {
-			t.Fatalf("failed to download boringssl: %s", err)
-		}
-		var j struct {
-			Dir string
-		}
-		if err := json.Unmarshal(output, &j); err != nil {
-			t.Fatalf("failed to parse 'go mod download' output: %s", err)
-		}
-		bogoDir = j.Dir
+		const boringsslModVer = "v0.0.0-20241120195446-5cce3fbd23e1"
+		bogoDir = cryptotest.FetchModule(t, "boringssl.googlesource.com/boringssl.git", boringsslModVer)
 	}
 
 	cwd, err := os.Getwd()
@@ -393,11 +551,7 @@ func TestBogoSuite(t *testing.T) {
 		args = append(args, fmt.Sprintf("-test=%s", *bogoFilter))
 	}
 
-	goCmd, err := testenv.GoTool()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(goCmd, args...)
+	cmd := testenv.Command(t, testenv.GoToolPath(t), args...)
 	out := &strings.Builder{}
 	cmd.Stderr = out
 	cmd.Dir = filepath.Join(bogoDir, "ssl/test/runner")
@@ -425,22 +579,38 @@ func TestBogoSuite(t *testing.T) {
 	// are present in the output. They are only checked if -bogo-filter
 	// was not passed.
 	assertResults := map[string]string{
-		"CurveTest-Client-Kyber-TLS13": "PASS",
-		"CurveTest-Server-Kyber-TLS13": "PASS",
+		"CurveTest-Client-MLKEM-TLS13": "PASS",
+		"CurveTest-Server-MLKEM-TLS13": "PASS",
+
+		// Various signature algorithm tests checking that we enforce our
+		// preferences on the peer.
+		"ClientAuth-Enforced":                    "PASS",
+		"ServerAuth-Enforced":                    "PASS",
+		"ClientAuth-Enforced-TLS13":              "PASS",
+		"ServerAuth-Enforced-TLS13":              "PASS",
+		"VerifyPreferences-Advertised":           "PASS",
+		"VerifyPreferences-Enforced":             "PASS",
+		"Client-TLS12-NoSign-RSA_PKCS1_MD5_SHA1": "PASS",
+		"Server-TLS12-NoSign-RSA_PKCS1_MD5_SHA1": "PASS",
+		"Client-TLS13-NoSign-RSA_PKCS1_MD5_SHA1": "PASS",
+		"Server-TLS13-NoSign-RSA_PKCS1_MD5_SHA1": "PASS",
 	}
 
 	for name, result := range results.Tests {
 		// This is not really the intended way to do this... but... it works?
 		t.Run(name, func(t *testing.T) {
 			if result.Actual == "FAIL" && result.IsUnexpected {
-				t.Fatal(result.Error)
+				t.Fail()
 			}
-			if expectedResult, ok := assertResults[name]; ok && expectedResult != result.Actual {
-				t.Fatalf("unexpected result: got %s, want %s", result.Actual, assertResults[name])
+			if result.Error != "" {
+				t.Log(result.Error)
+			}
+			if exp, ok := assertResults[name]; ok && exp != result.Actual {
+				t.Errorf("unexpected result: got %s, want %s", result.Actual, exp)
 			}
 			delete(assertResults, name)
 			if result.Actual == "SKIP" {
-				t.Skip()
+				t.SkipNow()
 			}
 		})
 	}

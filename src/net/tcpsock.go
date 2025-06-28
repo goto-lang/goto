@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// BUG(mikio): On JS and Windows, the File method of TCPConn and
+// BUG(mikio): On JS, the File method of TCPConn and
 // TCPListener is not implemented.
 
 // TCPAddr represents the address of a TCP end point.
@@ -324,7 +324,15 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		return nil, &OpError{Op: "dial", Net: network, Source: laddr.opAddr(), Addr: nil, Err: errMissingAddress}
 	}
 	sd := &sysDialer{network: network, address: raddr.String()}
-	c, err := sd.dialTCP(context.Background(), laddr, raddr)
+	var (
+		c   *TCPConn
+		err error
+	)
+	if sd.MultipathTCP() {
+		c, err = sd.dialMPTCP(context.Background(), laddr, raddr)
+	} else {
+		c, err = sd.dialTCP(context.Background(), laddr, raddr)
+	}
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: network, Source: laddr.opAddr(), Addr: raddr.opAddr(), Err: err}
 	}
@@ -409,6 +417,9 @@ func (l *TCPListener) SetDeadline(t time.Time) error {
 // The returned os.File's file descriptor is different from the
 // connection's. Attempting to change properties of the original
 // using this duplicate may or may not have the desired effect.
+//
+// On Windows, the returned os.File's file descriptor is not
+// usable on other processes.
 func (l *TCPListener) File() (f *os.File, err error) {
 	if !l.ok() {
 		return nil, syscall.EINVAL
@@ -439,7 +450,15 @@ func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 		laddr = &TCPAddr{}
 	}
 	sl := &sysListener{network: network, address: laddr.String()}
-	ln, err := sl.listenTCP(context.Background(), laddr)
+	var (
+		ln  *TCPListener
+		err error
+	)
+	if sl.MultipathTCP() {
+		ln, err = sl.listenMPTCP(context.Background(), laddr)
+	} else {
+		ln, err = sl.listenTCP(context.Background(), laddr)
+	}
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: laddr.opAddr(), Err: err}
 	}

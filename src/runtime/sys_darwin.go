@@ -70,12 +70,12 @@ func syscall6()
 //
 //go:linkname syscall_syscall9 syscall.syscall9
 //go:nosplit
-//go:cgo_unsafe_args
 func syscall_syscall9(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9 uintptr) (r1, r2, err uintptr) {
+	args := struct{ fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, r1, r2, err uintptr }{fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, r1, r2, err}
 	entersyscall()
-	libcCall(unsafe.Pointer(abi.FuncPCABI0(syscall9)), unsafe.Pointer(&fn))
+	libcCall(unsafe.Pointer(abi.FuncPCABI0(syscall9)), unsafe.Pointer(&args))
 	exitsyscall()
-	return
+	return args.r1, args.r2, args.err
 }
 func syscall9()
 
@@ -571,6 +571,15 @@ func pthread_cond_signal(c *pthreadcond) int32 {
 }
 func pthread_cond_signal_trampoline()
 
+//go:nosplit
+//go:cgo_unsafe_args
+func arc4random_buf(p unsafe.Pointer, n int32) {
+	// arc4random_buf() never fails, per its man page, so it's safe to ignore the return value.
+	libcCall(unsafe.Pointer(abi.FuncPCABI0(arc4random_buf_trampoline)), unsafe.Pointer(&p))
+	KeepAlive(p)
+}
+func arc4random_buf_trampoline()
+
 // Not used on Darwin, but must be defined.
 func exitThread(wait *atomic.Uint32) {
 	throw("exitThread")
@@ -691,6 +700,7 @@ func proc_regionfilename_trampoline()
 //go:cgo_import_dynamic libc_pthread_cond_wait pthread_cond_wait "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_pthread_cond_timedwait_relative_np pthread_cond_timedwait_relative_np "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_pthread_cond_signal pthread_cond_signal "/usr/lib/libSystem.B.dylib"
+//go:cgo_import_dynamic libc_arc4random_buf arc4random_buf "/usr/lib/libSystem.B.dylib"
 
 //go:cgo_import_dynamic libc_notify_is_valid_token notify_is_valid_token "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_xpc_date_create_from_current xpc_date_create_from_current "/usr/lib/libSystem.B.dylib"

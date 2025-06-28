@@ -634,16 +634,16 @@ func tcIndex(n *ir.IndexExpr) ir.Node {
 func tcLenCap(n *ir.UnaryExpr) ir.Node {
 	n.X = Expr(n.X)
 	n.X = DefaultLit(n.X, nil)
-	n.X = implicitstar(n.X)
 	l := n.X
 	t := l.Type()
 	if t == nil {
 		n.SetType(nil)
 		return n
 	}
-
 	var ok bool
-	if n.Op() == ir.OLEN {
+	if t.IsPtr() && t.Elem().IsArray() {
+		ok = true
+	} else if n.Op() == ir.OLEN {
 		ok = okforlen[t.Kind()]
 	} else {
 		ok = okforcap[t.Kind()]
@@ -788,19 +788,15 @@ func tcSlice(n *ir.SliceExpr) ir.Node {
 		return n
 	}
 
-	if n.Low != nil && !checksliceindex(l, n.Low, tp) {
+	if n.Low != nil && !checksliceindex(n.Low) {
 		n.SetType(nil)
 		return n
 	}
-	if n.High != nil && !checksliceindex(l, n.High, tp) {
+	if n.High != nil && !checksliceindex(n.High) {
 		n.SetType(nil)
 		return n
 	}
-	if n.Max != nil && !checksliceindex(l, n.Max, tp) {
-		n.SetType(nil)
-		return n
-	}
-	if !checksliceconst(n.Low, n.High) || !checksliceconst(n.Low, n.Max) || !checksliceconst(n.High, n.Max) {
+	if n.Max != nil && !checksliceindex(n.Max) {
 		n.SetType(nil)
 		return n
 	}

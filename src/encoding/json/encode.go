@@ -2,12 +2,46 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package json implements encoding and decoding of JSON as defined in
-// RFC 7159. The mapping between JSON and Go values is described
-// in the documentation for the Marshal and Unmarshal functions.
+//go:build !goexperiment.jsonv2
+
+// Package json implements encoding and decoding of JSON as defined in RFC 7159.
+// The mapping between JSON and Go values is described in the documentation for
+// the Marshal and Unmarshal functions.
 //
 // See "JSON and Go" for an introduction to this package:
 // https://golang.org/doc/articles/json_and_go.html
+//
+// # Security Considerations
+//
+// The JSON standard (RFC 7159) is lax in its definition of a number of parser
+// behaviors. As such, many JSON parsers behave differently in various
+// scenarios. These differences in parsers mean that systems that use multiple
+// independent JSON parser implementations may parse the same JSON object in
+// differing ways.
+//
+// Systems that rely on a JSON object being parsed consistently for security
+// purposes should be careful to understand the behaviors of this parser, as
+// well as how these behaviors may cause interoperability issues with other
+// parser implementations.
+//
+// Due to the Go Backwards Compatibility promise (https://go.dev/doc/go1compat)
+// there are a number of behaviors this package exhibits that may cause
+// interopability issues, but cannot be changed. In particular the following
+// parsing behaviors may cause issues:
+//
+//   - If a JSON object contains duplicate keys, keys are processed in the order
+//     they are observed, meaning later values will replace or be merged into
+//     prior values, depending on the field type (in particular maps and structs
+//     will have values merged, while other types have values replaced).
+//   - When parsing a JSON object into a Go struct, keys are considered in a
+//     case-insensitive fashion.
+//   - When parsing a JSON object into a Go struct, unknown keys in the JSON
+//     object are ignored (unless a [Decoder] is used and
+//     [Decoder.DisallowUnknownFields] has been called).
+//   - Invalid UTF-8 bytes in JSON strings are replaced by the Unicode
+//     replacement character.
+//   - Large JSON number integers will lose precision when unmarshaled into
+//     floating-point types.
 package json
 
 import (
@@ -72,8 +106,8 @@ import (
 //
 // The "omitempty" option specifies that the field should be omitted
 // from the encoding if the field has an empty value, defined as
-// false, 0, a nil pointer, a nil interface value, and any empty array,
-// slice, map, or string.
+// false, 0, a nil pointer, a nil interface value, and any array,
+// slice, map, or string of length zero.
 //
 // As a special case, if the field tag is "-", the field is always omitted.
 // Note that a field with name "-" can still be generated using the tag "-,".
@@ -98,6 +132,17 @@ import (
 //
 //	// Field appears in JSON as key "-".
 //	Field int `json:"-,"`
+//
+// The "omitzero" option specifies that the field should be omitted
+// from the encoding if the field has a zero value, according to rules:
+//
+// 1) If the field type has an "IsZero() bool" method, that will be used to
+// determine whether the value is zero.
+//
+// 2) Otherwise, the value is zero if it is the zero value for its type.
+//
+// If both "omitempty" and "omitzero" are specified, the field will be omitted
+// if the value is either empty or zero (or both).
 //
 // The "string" option signals that a field is stored as JSON inside a
 // JSON-encoded string. It applies only to fields of string, floating point,
@@ -346,25 +391,22 @@ func typeEncoder(t reflect.Type) encoderFunc {
 	}
 
 	// To deal with recursive types, populate the map with an
-	// indirect func before we build it. This type waits on the
-	// real func (f) to be ready and then calls it. This indirect
-	// func is only used for recursive types.
-	var (
-		wg sync.WaitGroup
-		f  encoderFunc
-	)
-	wg.Add(1)
+	// indirect func before we build it. If the type is recursive,
+	// the second lookup for the type will return the indirect func.
+	//
+	// This indirect func is only used for recursive types,
+	// and briefly during racing calls to typeEncoder.
+	indirect := sync.OnceValue(func() encoderFunc {
+		return newTypeEncoder(t, true)
+	})
 	fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
-		wg.Wait()
-		f(e, v, opts)
+		indirect()(e, v, opts)
 	}))
 	if loaded {
 		return fi.(encoderFunc)
 	}
 
-	// Compute the real encoder and replace the indirect func with it.
-	f = newTypeEncoder(t, true)
-	wg.Done()
+	f := indirect()
 	encoderCache.Store(t, f)
 	return f
 }
@@ -701,7 +743,8 @@ FieldLoop:
 			fv = fv.Field(i)
 		}
 
-		if f.omitEmpty && isEmptyValue(fv) {
+		if (f.omitEmpty && isEmptyValue(fv)) ||
+			(f.omitZero && (f.isZero == nil && fv.IsZero() || (f.isZero != nil && f.isZero(fv)))) {
 			continue
 		}
 		e.WriteByte(next)
@@ -819,7 +862,7 @@ func (se sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 		// Here we use a struct to memorize the pointer to the first element of the slice
 		// and its length.
 		ptr := struct {
-			ptr interface{} // always an unsafe.Pointer, but avoids a dependency on package unsafe
+			ptr any // always an unsafe.Pointer, but avoids a dependency on package unsafe
 			len int
 		}{v.UnsafePointer(), v.Len()}
 		if _, ok := e.ptrSeen[ptr]; ok {
@@ -1003,10 +1046,7 @@ func appendString[Bytes []byte | string](dst []byte, src Bytes, escapeHTML bool)
 		// For now, cast only a small portion of byte slices to a string
 		// so that it can be stack allocated. This slows down []byte slightly
 		// due to the extra copy, but keeps string performance roughly the same.
-		n := len(src) - i
-		if n > utf8.UTFMax {
-			n = utf8.UTFMax
-		}
+		n := min(len(src)-i, utf8.UTFMax)
 		c, size := utf8.DecodeRuneInString(string(src[i : i+n]))
 		if c == utf8.RuneError && size == 1 {
 			dst = append(dst, src[start:i]...)
@@ -1048,10 +1088,18 @@ type field struct {
 	index     []int
 	typ       reflect.Type
 	omitEmpty bool
+	omitZero  bool
+	isZero    func(reflect.Value) bool
 	quoted    bool
 
 	encoder encoderFunc
 }
+
+type isZeroer interface {
+	IsZero() bool
+}
+
+var isZeroerType = reflect.TypeFor[isZeroer]()
 
 // typeFields returns a list of fields that JSON should recognize for the given type.
 // The algorithm is breadth-first search over the set of structs to include - the top struct
@@ -1154,6 +1202,7 @@ func typeFields(t reflect.Type) structFields {
 						index:     index,
 						typ:       ft,
 						omitEmpty: opts.Contains("omitempty"),
+						omitZero:  opts.Contains("omitzero"),
 						quoted:    quoted,
 					}
 					field.nameBytes = []byte(field.name)
@@ -1162,6 +1211,40 @@ func typeFields(t reflect.Type) structFields {
 					nameEscBuf = appendHTMLEscape(nameEscBuf[:0], field.nameBytes)
 					field.nameEscHTML = `"` + string(nameEscBuf) + `":`
 					field.nameNonEsc = `"` + field.name + `":`
+
+					if field.omitZero {
+						t := sf.Type
+						// Provide a function that uses a type's IsZero method.
+						switch {
+						case t.Kind() == reflect.Interface && t.Implements(isZeroerType):
+							field.isZero = func(v reflect.Value) bool {
+								// Avoid panics calling IsZero on a nil interface or
+								// non-nil interface with nil pointer.
+								return v.IsNil() ||
+									(v.Elem().Kind() == reflect.Pointer && v.Elem().IsNil()) ||
+									v.Interface().(isZeroer).IsZero()
+							}
+						case t.Kind() == reflect.Pointer && t.Implements(isZeroerType):
+							field.isZero = func(v reflect.Value) bool {
+								// Avoid panics calling IsZero on nil pointer.
+								return v.IsNil() || v.Interface().(isZeroer).IsZero()
+							}
+						case t.Implements(isZeroerType):
+							field.isZero = func(v reflect.Value) bool {
+								return v.Interface().(isZeroer).IsZero()
+							}
+						case reflect.PointerTo(t).Implements(isZeroerType):
+							field.isZero = func(v reflect.Value) bool {
+								if !v.CanAddr() {
+									// Temporarily box v so we can take the address.
+									v2 := reflect.New(v.Type()).Elem()
+									v2.Set(v)
+									v = v2
+								}
+								return v.Addr().Interface().(isZeroer).IsZero()
+							}
+						}
+					}
 
 					fields = append(fields, field)
 					if count[f.typ] > 1 {

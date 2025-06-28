@@ -166,7 +166,7 @@ func parent(config Config) *StartResult {
 	}
 
 	childShouldUpload := config.Upload && acquireUploadToken()
-	reportCrashes := config.ReportCrashes && crashmonitor.Supported()
+	reportCrashes := config.ReportCrashes
 
 	if reportCrashes || childShouldUpload {
 		startChild(reportCrashes, childShouldUpload, result)
@@ -206,7 +206,8 @@ func startChild(reportCrashes, upload bool, result *StartResult) {
 	fd, err := os.Stat(telemetry.Default.DebugDir())
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Fatalf("failed to stat debug directory: %v", err)
+			log.Printf("failed to stat debug directory: %v", err)
+			return
 		}
 	} else if fd.IsDir() {
 		// local/debug exists and is a directory. Set stderr to a log file path
@@ -214,23 +215,31 @@ func startChild(reportCrashes, upload bool, result *StartResult) {
 		childLogPath := filepath.Join(telemetry.Default.DebugDir(), "sidecar.log")
 		childLog, err := os.OpenFile(childLogPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 		if err != nil {
-			log.Fatalf("opening sidecar log file for child: %v", err)
+			log.Printf("opening sidecar log file for child: %v", err)
+			return
 		}
 		defer childLog.Close()
 		cmd.Stderr = childLog
 	}
 
+	var crashOutputFile *os.File
 	if reportCrashes {
 		pipe, err := cmd.StdinPipe()
 		if err != nil {
-			log.Fatalf("StdinPipe: %v", err)
+			log.Printf("StdinPipe: %v", err)
+			return
 		}
 
-		crashmonitor.Parent(pipe.(*os.File)) // (this conversion is safe)
+		crashOutputFile = pipe.(*os.File) // (this conversion is safe)
 	}
 
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("can't start telemetry child process: %v", err)
+		// The child couldn't be started. Log the failure.
+		log.Printf("can't start telemetry child process: %v", err)
+		return
+	}
+	if reportCrashes {
+		crashmonitor.Parent(crashOutputFile)
 	}
 	result.wg.Add(1)
 	go func() {
@@ -258,9 +267,8 @@ func child(config Config) {
 	os.Setenv(telemetryChildVar, "2")
 	upload := os.Getenv(telemetryUploadVar) == "1"
 
-	reportCrashes := config.ReportCrashes && crashmonitor.Supported()
-	uploadStartTime := config.UploadStartTime
-	uploadURL := config.UploadURL
+	// The crashmonitor and/or upload process may themselves record counters.
+	counter.Open()
 
 	// Start crashmonitoring and uploading depending on what's requested
 	// and wait for the longer running child to complete before exiting:
@@ -268,7 +276,7 @@ func child(config Config) {
 	// upload to finish before exiting
 	var g errgroup.Group
 
-	if reportCrashes {
+	if config.ReportCrashes {
 		g.Go(func() error {
 			crashmonitor.Child()
 			return nil
@@ -276,7 +284,7 @@ func child(config Config) {
 	}
 	if upload {
 		g.Go(func() error {
-			uploaderChild(uploadStartTime, uploadURL)
+			uploaderChild(config.UploadStartTime, config.UploadURL)
 			return nil
 		})
 	}

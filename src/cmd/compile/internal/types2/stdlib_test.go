@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -317,6 +318,7 @@ func TestStdFixed(t *testing.T) {
 		"issue16369.go",  // types2 handles this correctly - not an issue
 		"issue18459.go",  // types2 doesn't check validity of //go:xxx directives
 		"issue18882.go",  // types2 doesn't check validity of //go:xxx directives
+		"issue20027.go",  // types2 does not have constraints on channel element size
 		"issue20529.go",  // types2 does not have constraints on stack size
 		"issue22200.go",  // types2 does not have constraints on stack size
 		"issue22200b.go", // types2 does not have constraints on stack size
@@ -330,6 +332,8 @@ func TestStdFixed(t *testing.T) {
 		"issue49814.go",  // go/types does not have constraints on array size
 		"issue56103.go",  // anonymous interface cycles; will be a type checker error in 1.22
 		"issue52697.go",  // types2 does not have constraints on stack size
+		"issue73309.go",  // this test requires GODEBUG=gotypesalias=1
+		"issue73309b.go", // this test requires GODEBUG=gotypesalias=1
 
 		// These tests requires runtime/cgo.Incomplete, which is only available on some platforms.
 		// However, types2 does not know about build constraints.
@@ -352,11 +356,8 @@ func TestStdKen(t *testing.T) {
 
 // Package paths of excluded packages.
 var excluded = map[string]bool{
-	"builtin": true,
-
-	// go.dev/issue/46027: some imports are missing for this submodule.
-	"crypto/internal/edwards25519/field/_asm": true,
-	"crypto/internal/bigmod/_asm":             true,
+	"builtin":                       true,
+	"cmd/compile/internal/ssa/_gen": true,
 }
 
 // printPackageMu synchronizes the printing of type-checked package files in
@@ -437,6 +438,11 @@ func pkgFilenames(dir string, includeTest bool) ([]string, error) {
 		return nil, err
 	}
 	if excluded[pkg.ImportPath] {
+		return nil, nil
+	}
+	if slices.Contains(strings.Split(pkg.ImportPath, "/"), "_asm") {
+		// Submodules where not all dependencies are available.
+		// See go.dev/issue/46027.
 		return nil, nil
 	}
 	var filenames []string

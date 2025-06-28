@@ -34,6 +34,7 @@ For example, if a Go program is running in an environment that contains
 
 then that Go program will disable the use of HTTP/2 by default in both
 the HTTP client and the HTTP server.
+Unrecognized settings in the `GODEBUG` environment variable are ignored.
 It is also possible to set the default `GODEBUG` for a given program
 (discussed below).
 
@@ -108,7 +109,9 @@ Only the work module's `go.mod` is consulted for `godebug` directives.
 Any directives in required dependency modules are ignored.
 It is an error to list a `godebug` with an unrecognized setting.
 (Toolchains older than Go 1.23 reject all `godebug` lines, since they do not
-understand `godebug` at all.)
+understand `godebug` at all.) When a workspace is in use, `godebug`
+directives in `go.mod` files are ignored, and `go.work` will be consulted
+for `godebug` directives instead.
 
 The defaults from the `go` and `godebug` lines apply to all main
 packages that are built. For more fine-grained control,
@@ -150,6 +153,117 @@ for example,
 see the [runtime documentation](/pkg/runtime#hdr-Environment_Variables)
 and the [go command documentation](/cmd/go#hdr-Build_and_test_caching).
 
+### Go 1.25
+
+Go 1.25 added a new `decoratemappings` setting that controls whether the Go
+runtime annotates OS anonymous memory mappings with context about their
+purpose. These annotations appear in /proc/self/maps and /proc/self/smaps as
+"[anon: Go: ...]". This setting is only used on Linux. For Go 1.25, it defaults
+to `decoratemappings=1`, enabling annotations. Using `decoratemappings=0`
+reverts to the pre-Go 1.25 behavior. This setting is fixed at program startup
+time, and can't be modified by changing the `GODEBUG` environment variable
+after the program starts.
+
+Go 1.25 added a new `embedfollowsymlinks` setting that controls whether the
+Go command will follow symlinks to regular files embedding files.
+The default value `embedfollowsymlinks=0` does not allow following
+symlinks. `embedfollowsymlinks=1` will allow following symlinks.
+
+Go 1.25 added a new `containermaxprocs` setting that controls whether the Go
+runtime will consider cgroup CPU limits when setting the default GOMAXPROCS.
+The default value `containermaxprocs=1` will use cgroup limits in addition to
+the total logical CPU count and CPU affinity. `containermaxprocs=0` will
+disable consideration of cgroup limits. This setting only affects Linux.
+
+Go 1.25 added a new `updatemaxprocs` setting that controls whether the Go
+runtime will periodically update GOMAXPROCS for new CPU affinity or cgroup
+limits. The default value `updatemaxprocs=1` will enable periodic updates.
+`updatemaxprocs=0` will disable periodic updates.
+
+Go 1.25 disabled SHA-1 signature algorithms in TLS 1.2 according to RFC 9155.
+The default can be reverted using the `tlssha1=1` setting.
+
+Go 1.25 switched to SHA-256 to fill in missing SubjectKeyId in
+crypto/x509.CreateCertificate. The setting `x509sha256skid=0` reverts to SHA-1.
+
+Go 1.25 corrected the semantics of contention reports for runtime-internal locks,
+and so removed the [`runtimecontentionstacks` setting](/pkg/runtime#hdr-Environment_Variables).
+
+### Go 1.24
+
+Go 1.24 added a new `fips140` setting that controls whether the Go
+Cryptographic Module operates in FIPS 140-3 mode.
+The possible values are:
+- "off": no special support for FIPS 140-3 mode. This is the default.
+- "on": the Go Cryptographic Module operates in FIPS 140-3 mode.
+- "only": like "on", but cryptographic algorithms not approved by
+  FIPS 140-3 return an error or panic.
+For more information, see [FIPS 140-3 Compliance](/doc/security/fips140).
+This setting is fixed at program startup time, and can't be modified
+by changing the `GODEBUG` environment variable after the program starts.
+
+Go 1.24 changed the global [`math/rand.Seed`](/pkg/math/rand/#Seed) to be a
+no-op. This behavior is controlled by the `randseednop` setting.
+For Go 1.24 it defaults to `randseednop=1`.
+Using `randseednop=0` reverts to the pre-Go 1.24 behavior.
+
+Go 1.24 added new values for the `multipathtcp` setting.
+The possible values for `multipathtcp` are now:
+- "0": disable MPTCP on dialers and listeners by default
+- "1": enable MPTCP on dialers and listeners by default
+- "2": enable MPTCP on listeners only by default
+- "3": enable MPTCP on dialers only by default
+
+For Go 1.24, it now defaults to multipathtcp="2", thus
+enabled by default on listeners. Using multipathtcp="0" reverts to the
+pre-Go 1.24 behavior.
+
+Go 1.24 changed the behavior of `go test -json` to emit build errors as JSON
+instead of text.
+These new JSON events are distinguished by new `Action` values,
+but can still cause problems with CI systems that aren't robust to these events.
+This behavior can be controlled with the `gotestjsonbuildtext` setting.
+Using `gotestjsonbuildtext=1` restores the 1.23 behavior.
+This setting will be removed in a future release, Go 1.28 at the earliest.
+
+Go 1.24 changed [`crypto/rsa`](/pkg/crypto/rsa) to require RSA keys to be at
+least 1024 bits. This behavior can be controlled with the `rsa1024min` setting.
+Using `rsa1024min=0` restores the Go 1.23 behavior.
+
+Go 1.24 introduced a mechanism for enabling platform specific Data Independent
+Timing (DIT) modes in the [`crypto/subtle`](/pkg/crypto/subtle) package. This
+mode can be enabled for an entire program with the `dataindependenttiming` setting.
+For Go 1.24 it defaults to `dataindependenttiming=0`. There is no change in default
+behavior from Go 1.23 when `dataindependenttiming` is unset.
+Using `dataindependenttiming=1` enables the DIT mode for the entire Go program.
+When enabled, DIT will be enabled when calling into C from Go. When enabled,
+calling into Go code from C will enable DIT, and disable it before returning to
+C if it was not enabled when Go code was entered.
+This currently only affects arm64 programs. For all other platforms it is a no-op.
+
+Go 1.24 removed the `x509sha1` setting.  `crypto/x509` no longer supports verifying
+signatures on certificates that use SHA-1 based signature algorithms.
+
+Go 1.24 changes the default value of the [`x509usepolicies`
+setting.](/pkg/crypto/x509/#CreateCertificate) from `0` to `1`. When marshalling
+certificates, policies are now taken from the
+[`Certificate.Policies`](/pkg/crypto/x509/#Certificate.Policies) field rather
+than the
+[`Certificate.PolicyIdentifiers`](/pkg/crypto/x509/#Certificate.PolicyIdentifiers)
+field by default.
+
+Go 1.24 enabled the post-quantum key exchange mechanism
+X25519MLKEM768 by default. The default can be reverted using the
+[`tlsmlkem` setting](/pkg/crypto/tls/#Config.CurvePreferences).
+This can be useful when dealing with buggy TLS servers that do not handle large records correctly,
+causing a timeout during the handshake (see [TLS post-quantum TL;DR fail](https://tldr.fail/)).
+Go 1.24 also removed X25519Kyber768Draft00 and the Go 1.23 `tlskyber` setting.
+
+Go 1.24 made [`ParsePKCS1PrivateKey`](/pkg/crypto/x509/#ParsePKCS1PrivateKey)
+use and validate the CRT parameters in the encoded private key. This behavior
+can be controlled with the `x509rsacrt` setting. Using `x509rsacrt=0` restores
+the Go 1.23 behavior.
+
 ### Go 1.23
 
 Go 1.23 changed the channels created by package time to be unbuffered
@@ -179,6 +293,8 @@ Previous versions default to `winreadlinkvolume=0`.
 Go 1.23 enabled the experimental post-quantum key exchange mechanism
 X25519Kyber768Draft00 by default. The default can be reverted using the
 [`tlskyber` setting](/pkg/crypto/tls/#Config.CurvePreferences).
+This can be useful when dealing with buggy TLS servers that do not handle large records correctly,
+causing a timeout during the handshake (see [TLS post-quantum TL;DR fail](https://tldr.fail/)).
 
 Go 1.23 changed the behavior of
 [crypto/x509.ParseCertificate](/pkg/crypto/x509/#ParseCertificate) to reject
@@ -253,7 +369,7 @@ In particular, a common default Linux kernel configuration can result in
 significant memory overheads, and Go 1.22 no longer works around this default.
 To work around this issue without adjusting kernel settings, transparent huge
 pages can be disabled for Go memory with the
-[`disablethp` setting](/pkg/runtime#hdr-Environment_Variable).
+[`disablethp` setting](/pkg/runtime#hdr-Environment_Variables).
 This behavior was backported to Go 1.21.1, but the setting is only available
 starting with Go 1.21.6.
 This setting may be removed in a future release, and users impacted by this issue
@@ -265,7 +381,7 @@ Go 1.22 added contention on runtime-internal locks to the [`mutex`
 profile](/pkg/runtime/pprof#Profile). Contention on these locks is always
 reported at `runtime._LostContendedRuntimeLock`. Complete stack traces of
 runtime locks can be enabled with the [`runtimecontentionstacks`
-setting](/pkg/runtime#hdr-Environment_Variable). These stack traces have
+setting](/pkg/runtime#hdr-Environment_Variables). These stack traces have
 non-standard semantics, see setting documentation for details.
 
 Go 1.22 added a new [`crypto/x509.Certificate`](/pkg/crypto/x509/#Certificate)
@@ -274,7 +390,7 @@ certificate policy OIDs with components larger than 31 bits. By default this
 field is only used during parsing, when it is populated with policy OIDs, but
 not used during marshaling. It can be used to marshal these larger OIDs, instead
 of the existing PolicyIdentifiers field, by using the
-[`x509usepolicies` setting.](/pkg/crypto/x509/#CreateCertificate).
+[`x509usepolicies` setting](/pkg/crypto/x509/#CreateCertificate).
 
 
 ### Go 1.21
@@ -342,7 +458,7 @@ There is no plan to remove this setting.
 
 Go 1.18 removed support for SHA1 in most X.509 certificates,
 controlled by the [`x509sha1` setting](/pkg/crypto/x509#InsecureAlgorithmError).
-This setting will be removed in a future release, Go 1.22 at the earliest.
+This setting was removed in Go 1.24.
 
 ### Go 1.10
 

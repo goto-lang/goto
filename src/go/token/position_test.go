@@ -7,7 +7,8 @@ package token
 import (
 	"fmt"
 	"math/rand"
-	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -130,7 +131,7 @@ func TestPositions(t *testing.T) {
 		if f.LineCount() != len(test.lines) {
 			t.Errorf("%s, SetLines: got line count %d; want %d", f.Name(), f.LineCount(), len(test.lines))
 		}
-		if !reflect.DeepEqual(f.Lines(), test.lines) {
+		if !slices.Equal(f.Lines(), test.lines) {
 			t.Errorf("%s, Lines after SetLines(v): got %v; want %v", f.Name(), f.Lines(), test.lines)
 		}
 		verifyPositions(t, fset, f, test.lines)
@@ -472,7 +473,7 @@ func TestFileAddLineColumnInfo(t *testing.T) {
 			for _, info := range test.infos {
 				f.AddLineColumnInfo(info.Offset, info.Filename, info.Line, info.Column)
 			}
-			if !reflect.DeepEqual(f.infos, test.want) {
+			if !slices.Equal(f.infos, test.want) {
 				t.Errorf("\ngot %+v, \nwant %+v", f.infos, test.want)
 			}
 		})
@@ -536,4 +537,45 @@ func TestIssue57490(t *testing.T) {
 			t.Errorf("pos = %d, want %d", got, want2)
 		}
 	}
+}
+
+func TestFileSet_AddExistingFiles(t *testing.T) {
+	fset := NewFileSet()
+
+	check := func(descr, want string) {
+		t.Helper()
+		if got := fsetString(fset); got != want {
+			t.Errorf("%s: got %s, want %s", descr, got, want)
+		}
+	}
+
+	fileA := fset.AddFile("A", -1, 3)
+	fileB := fset.AddFile("B", -1, 5)
+	_ = fileB
+	check("after AddFile [AB]", "{A:1-4 B:5-10}")
+
+	fset.AddExistingFiles() // noop
+	check("after AddExistingFiles []", "{A:1-4 B:5-10}")
+
+	fileC := NewFileSet().AddFile("C", 100, 5)
+	fileD := NewFileSet().AddFile("D", 200, 5)
+	fset.AddExistingFiles(fileC, fileA, fileD, fileC)
+	check("after AddExistingFiles [CADC]", "{A:1-4 B:5-10 C:100-105 D:200-205}")
+
+	fileE := fset.AddFile("E", -1, 3)
+	_ = fileE
+	check("after AddFile [E]", "{A:1-4 B:5-10 C:100-105 D:200-205 E:206-209}")
+}
+
+func fsetString(fset *FileSet) string {
+	var buf strings.Builder
+	buf.WriteRune('{')
+	sep := ""
+	fset.Iterate(func(f *File) bool {
+		fmt.Fprintf(&buf, "%s%s:%d-%d", sep, f.Name(), f.Base(), f.Base()+f.Size())
+		sep = " "
+		return true
+	})
+	buf.WriteRune('}')
+	return buf.String()
 }

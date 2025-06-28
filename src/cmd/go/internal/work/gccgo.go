@@ -18,6 +18,7 @@ import (
 	"cmd/go/internal/fsys"
 	"cmd/go/internal/load"
 	"cmd/go/internal/str"
+	"cmd/internal/pathcache"
 	"cmd/internal/pkgpath"
 )
 
@@ -26,6 +27,7 @@ import (
 type gccgoToolchain struct{}
 
 var GccgoName, GccgoBin string
+var GccgoChanged bool
 var gccgoErr error
 
 func init() {
@@ -33,7 +35,10 @@ func init() {
 	if GccgoName == "" {
 		GccgoName = "gccgo"
 	}
-	GccgoBin, gccgoErr = cfg.LookPath(GccgoName)
+	if GccgoName != "gccgo" {
+		GccgoChanged = true
+	}
+	GccgoBin, gccgoErr = pathcache.LookPath(GccgoName)
 }
 
 func (gccgoToolchain) compiler() string {
@@ -106,8 +111,7 @@ func (tools gccgoToolchain) gc(b *Builder, a *Action, archive string, importcfg,
 		if fsys.OverlayFile != "" {
 			for _, name := range gofiles {
 				absPath := mkAbs(p.Dir, name)
-				overlayPath, ok := fsys.OverlayPath(absPath)
-				if !ok {
+				if !fsys.Replaced(absPath) {
 					continue
 				}
 				toPath := absPath
@@ -116,7 +120,7 @@ func (tools gccgoToolchain) gc(b *Builder, a *Action, archive string, importcfg,
 				if cfg.BuildTrimpath && str.HasFilePathPrefix(toPath, base.Cwd()) {
 					toPath = "." + toPath[len(base.Cwd()):]
 				}
-				args = append(args, "-ffile-prefix-map="+overlayPath+"="+toPath)
+				args = append(args, "-ffile-prefix-map="+fsys.Actual(absPath)+"="+toPath)
 			}
 		}
 	}
@@ -126,8 +130,7 @@ func (tools gccgoToolchain) gc(b *Builder, a *Action, archive string, importcfg,
 		f := mkAbs(p.Dir, f)
 		// Overlay files if necessary.
 		// See comment on gctoolchain.gc about overlay TODOs
-		f, _ = fsys.OverlayPath(f)
-		args = append(args, f)
+		args = append(args, fsys.Actual(f))
 	}
 
 	output, err = sh.runOut(p.Dir, nil, args)
@@ -199,7 +202,7 @@ func (tools gccgoToolchain) asm(b *Builder, a *Action, sfiles []string) ([]strin
 		base := filepath.Base(sfile)
 		ofile := a.Objdir + base[:len(base)-len(".s")] + ".o"
 		ofiles = append(ofiles, ofile)
-		sfile, _ = fsys.OverlayPath(mkAbs(p.Dir, sfile))
+		sfile = fsys.Actual(mkAbs(p.Dir, sfile))
 		defs := []string{"-D", "GOOS_" + cfg.Goos, "-D", "GOARCH_" + cfg.Goarch}
 		if pkgpath := tools.gccgoCleanPkgpath(b, p); pkgpath != "" {
 			defs = append(defs, `-D`, `GOPKGPATH=`+pkgpath)
@@ -229,7 +232,7 @@ func (tools gccgoToolchain) pack(b *Builder, a *Action, afile string, ofiles []s
 	p := a.Package
 	sh := b.Shell(a)
 	objdir := a.Objdir
-	var absOfiles []string
+	absOfiles := make([]string, 0, len(ofiles))
 	for _, f := range ofiles {
 		absOfiles = append(absOfiles, mkAbs(objdir, f))
 	}

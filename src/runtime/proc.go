@@ -11,8 +11,9 @@ import (
 	"internal/goos"
 	"internal/runtime/atomic"
 	"internal/runtime/exithook"
+	"internal/runtime/strconv"
+	"internal/runtime/sys"
 	"internal/stringslite"
-	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -209,6 +210,7 @@ func main() {
 	}()
 
 	gcenable()
+	defaultGOMAXPROCSUpdateEnable() // don't STW before runtime initialized.
 
 	main_init_done = make(chan bool)
 	if iscgo {
@@ -266,13 +268,40 @@ func main() {
 	if isarchive || islibrary {
 		// A program compiled with -buildmode=c-archive or c-shared
 		// has a main, but it is not executed.
+		if GOARCH == "wasm" {
+			// On Wasm, pause makes it return to the host.
+			// Unlike cgo callbacks where Ms are created on demand,
+			// on Wasm we have only one M. So we keep this M (and this
+			// G) for callbacks.
+			// Using the caller's SP unwinds this frame and backs to
+			// goexit. The -16 is: 8 for goexit's (fake) return PC,
+			// and pause's epilogue pops 8.
+			pause(sys.GetCallerSP() - 16) // should not return
+			panic("unreachable")
+		}
 		return
 	}
 	fn := main_main // make an indirect call, as the linker doesn't know the address of the main package when laying down the runtime
 	fn()
+
+	exitHooksRun := false
 	if raceenabled {
 		runExitHooks(0) // run hooks now, since racefini does not return
+		exitHooksRun = true
 		racefini()
+	}
+
+	// Check for C memory leaks if using ASAN and we've made cgo calls,
+	// or if we are running as a library in a C program.
+	// We always make one cgo call, above, to notify_runtime_init_done,
+	// so we ignore that one.
+	// No point in leak checking if no cgo calls, since leak checking
+	// just looks for objects allocated using malloc and friends.
+	// Just checking iscgo doesn't help because asan implies iscgo.
+	if asanenabled && (isarchive || islibrary || NumCgoCall() > 1) {
+		runExitHooks(0) // lsandoleakcheck may not return
+		exitHooksRun = true
+		lsandoleakcheck()
 	}
 
 	// Make racy client program work: if panicking on
@@ -291,7 +320,9 @@ func main() {
 	if panicking.Load() != 0 {
 		gopark(nil, nil, waitReasonPanicWait, traceBlockForever, 1)
 	}
-	runExitHooks(0)
+	if !exitHooksRun {
+		runExitHooks(0)
+	}
 
 	exit(0)
 	for {
@@ -307,6 +338,11 @@ func os_beforeExit(exitCode int) {
 	runExitHooks(exitCode)
 	if exitCode == 0 && raceenabled {
 		racefini()
+	}
+
+	// See comment in main, above.
+	if exitCode == 0 && asanenabled && (isarchive || islibrary || NumCgoCall() > 1) {
+		lsandoleakcheck()
 	}
 }
 
@@ -739,6 +775,14 @@ func cpuinit(env string) {
 
 	case "arm64":
 		arm64HasATOMICS = cpu.ARM64.HasATOMICS
+
+	case "loong64":
+		loong64HasLAMCAS = cpu.Loong64.HasLAMCAS
+		loong64HasLAM_BH = cpu.Loong64.HasLAM_BH
+		loong64HasLSX = cpu.Loong64.HasLSX
+
+	case "riscv64":
+		riscv64HasZbb = cpu.RISCV64.HasZbb
 	}
 }
 
@@ -791,6 +835,7 @@ func schedinit() {
 	lockInit(&reflectOffs.lock, lockRankReflectOffs)
 	lockInit(&finlock, lockRankFin)
 	lockInit(&cpuprof.lock, lockRankCpuprof)
+	lockInit(&computeMaxProcsLock, lockRankComputeMaxProcs)
 	allocmLock.init(lockRankAllocmR, lockRankAllocmRInternal, lockRankAllocmW)
 	execLock.init(lockRankExecR, lockRankExecRInternal, lockRankExecW)
 	traceLockInit()
@@ -798,6 +843,8 @@ func schedinit() {
 	// All of this lock's critical sections should be
 	// extremely short.
 	lockInit(&memstats.heapStats.noPLock, lockRankLeafRank)
+
+	lockVerifyMSize()
 
 	// raceinit must be the first call to race detector.
 	// In particular, it must be done before mallocinit below calls racemapshadow.
@@ -852,12 +899,24 @@ func schedinit() {
 
 	// mcommoninit runs before parsedebugvars, so init profstacks again.
 	mProfStackInit(gp.m)
+	defaultGOMAXPROCSInit()
 
 	lock(&sched.lock)
 	sched.lastpoll.Store(nanotime())
-	procs := ncpu
-	if n, ok := atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
+	var procs int32
+	if n, ok := strconv.Atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
 		procs = n
+		sched.customGOMAXPROCS = true
+	} else {
+		// Use numCPUStartup for initial GOMAXPROCS for two reasons:
+		//
+		// 1. We just computed it in osinit, recomputing is (minorly) wasteful.
+		//
+		// 2. More importantly, if debug.containermaxprocs == 0 &&
+		//    debug.updatemaxprocs == 0, we want to guarantee that
+		//    runtime.GOMAXPROCS(0) always equals runtime.NumCPU (which is
+		//    just numCPUStartup).
+		procs = defaultGOMAXPROCS(numCPUStartup)
 	}
 	if procresize(procs) != nil {
 		throw("unknown runnable goroutine during bootstrap")
@@ -1211,6 +1270,12 @@ func casgstatus(gp *g, oldval, newval uint32) {
 		}
 	}
 
+	if gp.bubble != nil {
+		systemstack(func() {
+			gp.bubble.changegstatus(gp, oldval, newval)
+		})
+	}
+
 	if oldval == _Grunning {
 		// Track every gTrackingPeriod time a goroutine transitions out of running.
 		if casgstatusAlwaysTrack || gp.trackingSeq%gTrackingPeriod == 0 {
@@ -1282,34 +1347,15 @@ func casGToWaiting(gp *g, old uint32, reason waitReason) {
 	casgstatus(gp, old, _Gwaiting)
 }
 
-// casGToWaitingForGC transitions gp from old to _Gwaiting, and sets the wait reason.
-// The wait reason must be a valid isWaitingForGC wait reason.
+// casGToWaitingForSuspendG transitions gp from old to _Gwaiting, and sets the wait reason.
+// The wait reason must be a valid isWaitingForSuspendG wait reason.
 //
 // Use this over casgstatus when possible to ensure that a waitreason is set.
-func casGToWaitingForGC(gp *g, old uint32, reason waitReason) {
-	if !reason.isWaitingForGC() {
-		throw("casGToWaitingForGC with non-isWaitingForGC wait reason")
+func casGToWaitingForSuspendG(gp *g, old uint32, reason waitReason) {
+	if !reason.isWaitingForSuspendG() {
+		throw("casGToWaitingForSuspendG with non-isWaitingForSuspendG wait reason")
 	}
 	casGToWaiting(gp, old, reason)
-}
-
-// casgstatus(gp, oldstatus, Gcopystack), assuming oldstatus is Gwaiting or Grunnable.
-// Returns old status. Cannot call casgstatus directly, because we are racing with an
-// async wakeup that might come in from netpoll. If we see Gwaiting from the readgstatus,
-// it might have become Grunnable by the time we get to the cas. If we called casgstatus,
-// it would loop waiting for the status to go back to Gwaiting, which it never will.
-//
-//go:nosplit
-func casgcopystack(gp *g) uint32 {
-	for {
-		oldstatus := readgstatus(gp) &^ _Gscan
-		if oldstatus != _Gwaiting && oldstatus != _Grunnable {
-			throw("copystack: bad status, not Gwaiting or Grunnable")
-		}
-		if gp.atomicstatus.CompareAndSwap(oldstatus, _Gcopystack) {
-			return oldstatus
-		}
-	}
 }
 
 // casGToPreemptScan transitions gp from _Grunning to _Gscan|_Gpreempted.
@@ -1323,6 +1369,12 @@ func casGToPreemptScan(gp *g, old, new uint32) {
 	acquireLockRankAndM(lockRankGscan)
 	for !gp.atomicstatus.CompareAndSwap(_Grunning, _Gscan|_Gpreempted) {
 	}
+	// We never notify gp.bubble that the goroutine state has moved
+	// from _Grunning to _Gpreempted. We call bubble.changegstatus
+	// after status changes happen, but doing so here would violate the
+	// ordering between the gscan and synctest locks. The bubble doesn't
+	// distinguish between _Grunning and _Gpreempted anyway, so not
+	// notifying it is fine.
 }
 
 // casGFromPreempted attempts to transition gp from _Gpreempted to
@@ -1333,7 +1385,13 @@ func casGFromPreempted(gp *g, old, new uint32) bool {
 		throw("bad g transition")
 	}
 	gp.waitreason = waitReasonPreempted
-	return gp.atomicstatus.CompareAndSwap(_Gpreempted, _Gwaiting)
+	if !gp.atomicstatus.CompareAndSwap(_Gpreempted, _Gwaiting) {
+		return false
+	}
+	if bubble := gp.bubble; bubble != nil {
+		bubble.changegstatus(gp, _Gpreempted, _Gwaiting)
+	}
+	return true
 }
 
 // stwReason is an enumeration of reasons the world is stopping.
@@ -1429,23 +1487,7 @@ func stopTheWorld(reason stwReason) worldStop {
 	gp := getg()
 	gp.m.preemptoff = reason.String()
 	systemstack(func() {
-		// Mark the goroutine which called stopTheWorld preemptible so its
-		// stack may be scanned.
-		// This lets a mark worker scan us while we try to stop the world
-		// since otherwise we could get in a mutual preemption deadlock.
-		// We must not modify anything on the G stack because a stack shrink
-		// may occur. A stack shrink is otherwise OK though because in order
-		// to return from this function (and to leave the system stack) we
-		// must have preempted all goroutines, including any attempting
-		// to scan our stack, in which case, any stack shrinking will
-		// have already completed by the time we exit.
-		//
-		// N.B. The execution tracer is not aware of this status
-		// transition and handles it specially based on the
-		// wait reason.
-		casGToWaitingForGC(gp, _Grunning, waitReasonStoppingTheWorld)
 		stopTheWorldContext = stopTheWorldWithSema(reason) // avoid write to stack
-		casgstatus(gp, _Gwaiting, _Grunning)
 	})
 	return stopTheWorldContext
 }
@@ -1534,7 +1576,30 @@ var gcsema uint32 = 1
 //
 // Returns the STW context. When starting the world, this context must be
 // passed to startTheWorldWithSema.
+//
+//go:systemstack
 func stopTheWorldWithSema(reason stwReason) worldStop {
+	// Mark the goroutine which called stopTheWorld preemptible so its
+	// stack may be scanned by the GC or observed by the execution tracer.
+	//
+	// This lets a mark worker scan us or the execution tracer take our
+	// stack while we try to stop the world since otherwise we could get
+	// in a mutual preemption deadlock.
+	//
+	// We must not modify anything on the G stack because a stack shrink
+	// may occur, now that we switched to _Gwaiting, specifically if we're
+	// doing this during the mark phase (mark termination excepted, since
+	// we know that stack scanning is done by that point). A stack shrink
+	// is otherwise OK though because in order to return from this function
+	// (and to leave the system stack) we must have preempted all
+	// goroutines, including any attempting to scan our stack, in which
+	// case, any stack shrinking will have already completed by the time we
+	// exit.
+	//
+	// N.B. The execution tracer is not aware of this status transition and
+	// andles it specially based on the wait reason.
+	casGToWaitingForSuspendG(getg().m.curg, _Grunning, waitReasonStoppingTheWorld)
+
 	trace := traceAcquire()
 	if trace.ok() {
 		trace.STWStart(reason)
@@ -1641,6 +1706,9 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 	}
 
 	worldStopped()
+
+	// Switch back to _Grunning, now that the world is stopped.
+	casgstatus(getg().m.curg, _Gwaiting, _Grunning)
 
 	return worldStop{
 		reason:           reason,
@@ -1800,7 +1868,7 @@ func mstart0() {
 	mexit(osStack)
 }
 
-// The go:noinline is to guarantee the getcallerpc/getcallersp below are safe,
+// The go:noinline is to guarantee the sys.GetCallerPC/sys.GetCallerSP below are safe,
 // so that we can set up g0.sched to return to the call of mstart1 above.
 //
 //go:noinline
@@ -1818,8 +1886,8 @@ func mstart1() {
 	// And goexit0 does a gogo that needs to return from mstart1
 	// and let mstart0 exit the thread.
 	gp.sched.g = guintptr(unsafe.Pointer(gp))
-	gp.sched.pc = getcallerpc()
-	gp.sched.sp = getcallersp()
+	gp.sched.pc = sys.GetCallerPC()
+	gp.sched.sp = sys.GetCallerSP()
 
 	asminit()
 	minit()
@@ -1828,6 +1896,10 @@ func mstart1() {
 	// prepare the thread to be able to handle the signals.
 	if gp.m == &m0 {
 		mstartm0()
+	}
+
+	if debug.dataindependenttiming == 1 {
+		sys.EnableDIT()
 	}
 
 	if fn := gp.m.mstartfn; fn != nil {
@@ -1907,12 +1979,19 @@ func mexit(osStack bool) {
 	// Free the gsignal stack.
 	if mp.gsignal != nil {
 		stackfree(mp.gsignal.stack)
+		if valgrindenabled {
+			valgrindDeregisterStack(mp.gsignal.valgrindStackID)
+			mp.gsignal.valgrindStackID = 0
+		}
 		// On some platforms, when calling into VDSO (e.g. nanotime)
 		// we store our g on the gsignal stack, if there is one.
 		// Now the stack is freed, unlink it from the m, so we
 		// won't write to it when calling VDSO code.
 		mp.gsignal = nil
 	}
+
+	// Free vgetrandom state.
+	vgetrandomDestroy(mp)
 
 	// Remove m from allm.
 	lock(&sched.lock)
@@ -1999,15 +2078,23 @@ found:
 func forEachP(reason waitReason, fn func(*p)) {
 	systemstack(func() {
 		gp := getg().m.curg
-		// Mark the user stack as preemptible so that it may be scanned.
-		// Otherwise, our attempt to force all P's to a safepoint could
-		// result in a deadlock as we attempt to preempt a worker that's
-		// trying to preempt us (e.g. for a stack scan).
+		// Mark the user stack as preemptible so that it may be scanned
+		// by the GC or observed by the execution tracer. Otherwise, our
+		// attempt to force all P's to a safepoint could result in a
+		// deadlock as we attempt to preempt a goroutine that's trying
+		// to preempt us (e.g. for a stack scan).
+		//
+		// We must not modify anything on the G stack because a stack shrink
+		// may occur. A stack shrink is otherwise OK though because in order
+		// to return from this function (and to leave the system stack) we
+		// must have preempted all goroutines, including any attempting
+		// to scan our stack, in which case, any stack shrinking will
+		// have already completed by the time we exit.
 		//
 		// N.B. The execution tracer is not aware of this status
 		// transition and handles it specially based on the
 		// wait reason.
-		casGToWaitingForGC(gp, _Grunning, reason)
+		casGToWaitingForSuspendG(gp, _Grunning, reason)
 		forEachPInternal(fn)
 		casgstatus(gp, _Gwaiting, _Grunning)
 	})
@@ -2201,6 +2288,10 @@ func allocm(pp *p, fn func(), id int64) *m {
 				// startm.
 				systemstack(func() {
 					stackfree(freem.g0.stack)
+					if valgrindenabled {
+						valgrindDeregisterStack(freem.g0.valgrindStackID)
+						freem.g0.valgrindStackID = 0
+					}
 				})
 			}
 			freem = freem.freelink
@@ -2209,7 +2300,7 @@ func allocm(pp *p, fn func(), id int64) *m {
 		unlock(&sched.lock)
 	}
 
-	mp := new(m)
+	mp := &new(mPadded).m
 	mp.mstartfn = fn
 	mcommoninit(mp, id)
 
@@ -2318,7 +2409,7 @@ func needm(signal bool) {
 	// Install g (= m->g0) and set the stack bounds
 	// to match the current stack.
 	setg(mp.g0)
-	sp := getcallersp()
+	sp := sys.GetCallerSP()
 	callbackUpdateSystemStack(mp, sp, signal)
 
 	// Should mark we are already in Go now.
@@ -2539,6 +2630,7 @@ func dropm() {
 	g0.stack.lo = 0
 	g0.stackguard0 = 0
 	g0.stackguard1 = 0
+	mp.g0StackAccurate = false
 
 	putExtraM(mp)
 
@@ -3010,7 +3102,7 @@ func handoffp(pp *p) {
 	// findrunnable would return a G to run on pp.
 
 	// if it has local work, start it straight away
-	if !runqempty(pp) || sched.runqsize != 0 {
+	if !runqempty(pp) || !sched.runq.empty() {
 		startm(pp, false, false)
 		return
 	}
@@ -3049,7 +3141,7 @@ func handoffp(pp *p) {
 			notewakeup(&sched.safePointNote)
 		}
 	}
-	if sched.runqsize != 0 {
+	if !sched.runq.empty() {
 		unlock(&sched.lock)
 		startm(pp, false, false)
 		return
@@ -3215,10 +3307,10 @@ func execute(gp *g, inheritTime bool) {
 		tryRecordGoroutineProfile(gp, nil, osyield)
 	}
 
-	// Assign gp.m before entering _Grunning so running Gs have an
-	// M.
+	// Assign gp.m before entering _Grunning so running Gs have an M.
 	mp.curg = gp
 	gp.m = mp
+	gp.syncSafePoint = false // Clear the flag, which may have been set by morestack.
 	casgstatus(gp, _Grunnable, _Grunning)
 	gp.waitsince = 0
 	gp.preempt = false
@@ -3267,7 +3359,7 @@ top:
 	// which may steal timers. It's important that between now
 	// and then, nothing blocks, so these numbers remain mostly
 	// relevant.
-	now, pollUntil, _ := pp.timers.check(0)
+	now, pollUntil, _ := pp.timers.check(0, nil)
 
 	// Try to schedule the trace reader.
 	if traceEnabled() || traceShuttingDown() {
@@ -3295,9 +3387,9 @@ top:
 	// Check the global runnable queue once in a while to ensure fairness.
 	// Otherwise two goroutines can completely occupy the local runqueue
 	// by constantly respawning each other.
-	if pp.schedtick%61 == 0 && sched.runqsize > 0 {
+	if pp.schedtick%61 == 0 && !sched.runq.empty() {
 		lock(&sched.lock)
-		gp := globrunqget(pp, 1)
+		gp := globrunqget()
 		unlock(&sched.lock)
 		if gp != nil {
 			return gp, false, false
@@ -3310,6 +3402,12 @@ top:
 			ready(gp, 0, true)
 		}
 	}
+
+	// Wake up one or more cleanup Gs.
+	if gcCleanups.needsWake() {
+		gcCleanups.wake()
+	}
+
 	if *cgo_yield != nil {
 		asmcgocall(*cgo_yield, nil)
 	}
@@ -3320,11 +3418,14 @@ top:
 	}
 
 	// global runq
-	if sched.runqsize != 0 {
+	if !sched.runq.empty() {
 		lock(&sched.lock)
-		gp := globrunqget(pp, 0)
+		gp, q := globrunqgetbatch(int32(len(pp.runq)) / 2)
 		unlock(&sched.lock)
 		if gp != nil {
+			if runqputbatch(pp, &q); !q.empty() {
+				throw("Couldn't put Gs into empty local runq")
+			}
 			return gp, false, false
 		}
 	}
@@ -3336,8 +3437,12 @@ top:
 	// blocked thread (e.g. it has already returned from netpoll, but does
 	// not set lastpoll yet), this thread will do blocking netpoll below
 	// anyway.
-	if netpollinited() && netpollAnyWaiters() && sched.lastpoll.Load() != 0 {
-		if list, delta := netpoll(0); !list.empty() { // non-blocking
+	// We only poll from one thread at a time to avoid kernel contention
+	// on machines with many cores.
+	if netpollinited() && netpollAnyWaiters() && sched.lastpoll.Load() != 0 && sched.pollingNet.Swap(1) == 0 {
+		list, delta := netpoll(0)
+		sched.pollingNet.Store(0)
+		if !list.empty() { // non-blocking
 			gp := list.pop()
 			injectglist(&list)
 			netpollAdjustWaiters(delta)
@@ -3434,9 +3539,15 @@ top:
 		unlock(&sched.lock)
 		goto top
 	}
-	if sched.runqsize != 0 {
-		gp := globrunqget(pp, 0)
+	if !sched.runq.empty() {
+		gp, q := globrunqgetbatch(int32(len(pp.runq)) / 2)
 		unlock(&sched.lock)
+		if gp == nil {
+			throw("global runq empty with non-zero runqsize")
+		}
+		if runqputbatch(pp, &q); !q.empty() {
+			throw("Couldn't put Gs into empty local runq")
+		}
 		return gp, false, false
 	}
 	if !mp.spinning && sched.needspinning.Load() == 1 {
@@ -3506,14 +3617,17 @@ top:
 		// Check global and P runqueues again.
 
 		lock(&sched.lock)
-		if sched.runqsize != 0 {
+		if !sched.runq.empty() {
 			pp, _ := pidlegetSpinning(0)
 			if pp != nil {
-				gp := globrunqget(pp, 0)
+				gp, q := globrunqgetbatch(int32(len(pp.runq)) / 2)
+				unlock(&sched.lock)
 				if gp == nil {
 					throw("global runq empty with non-zero runqsize")
 				}
-				unlock(&sched.lock)
+				if runqputbatch(pp, &q); !q.empty() {
+					throw("Couldn't put Gs into empty local runq")
+				}
 				acquirep(pp)
 				mp.becomeSpinning()
 				return gp, false, false
@@ -3628,7 +3742,7 @@ top:
 // background work loops, like idle GC. It checks a subset of the
 // conditions checked by the actual scheduler.
 func pollWork() bool {
-	if sched.runqsize != 0 {
+	if !sched.runq.empty() {
 		return true
 	}
 	p := getg().m.p.ptr()
@@ -3684,7 +3798,7 @@ func stealWork(now int64) (gp *g, inheritTime bool, rnow, pollUntil int64, newWo
 			// timerpMask tells us whether the P may have timers at all. If it
 			// can't, no need to check at all.
 			if stealTimersOrRunNextG && timerpMask.read(enum.position()) {
-				tnow, w, ran := p2.timers.check(now)
+				tnow, w, ran := p2.timers.check(now, nil)
 				now = tnow
 				if w != 0 && (pollUntil == 0 || w < pollUntil) {
 					pollUntil = w
@@ -3872,33 +3986,28 @@ func injectglist(glist *gList) {
 	if glist.empty() {
 		return
 	}
-	trace := traceAcquire()
-	if trace.ok() {
-		for gp := glist.head.ptr(); gp != nil; gp = gp.schedlink.ptr() {
-			trace.GoUnpark(gp, 0)
-		}
-		traceRelease(trace)
-	}
 
 	// Mark all the goroutines as runnable before we put them
 	// on the run queues.
-	head := glist.head.ptr()
 	var tail *g
-	qsize := 0
-	for gp := head; gp != nil; gp = gp.schedlink.ptr() {
+	trace := traceAcquire()
+	for gp := glist.head.ptr(); gp != nil; gp = gp.schedlink.ptr() {
 		tail = gp
-		qsize++
 		casgstatus(gp, _Gwaiting, _Grunnable)
+		if trace.ok() {
+			trace.GoUnpark(gp, 0)
+		}
+	}
+	if trace.ok() {
+		traceRelease(trace)
 	}
 
 	// Turn the gList into a gQueue.
-	var q gQueue
-	q.head.set(head)
-	q.tail.set(tail)
+	q := gQueue{glist.head, tail.guintptr(), glist.size}
 	*glist = gList{}
 
-	startIdle := func(n int) {
-		for i := 0; i < n; i++ {
+	startIdle := func(n int32) {
+		for ; n > 0; n-- {
 			mp := acquirem() // See comment in startm.
 			lock(&sched.lock)
 
@@ -3917,32 +4026,32 @@ func injectglist(glist *gList) {
 
 	pp := getg().m.p.ptr()
 	if pp == nil {
+		n := q.size
 		lock(&sched.lock)
-		globrunqputbatch(&q, int32(qsize))
+		globrunqputbatch(&q)
 		unlock(&sched.lock)
-		startIdle(qsize)
+		startIdle(n)
 		return
 	}
 
-	npidle := int(sched.npidle.Load())
-	var (
-		globq gQueue
-		n     int
-	)
-	for n = 0; n < npidle && !q.empty(); n++ {
+	var globq gQueue
+	npidle := sched.npidle.Load()
+	for ; npidle > 0 && !q.empty(); npidle-- {
 		g := q.pop()
 		globq.pushBack(g)
 	}
-	if n > 0 {
+	if !globq.empty() {
+		n := globq.size
 		lock(&sched.lock)
-		globrunqputbatch(&globq, int32(n))
+		globrunqputbatch(&globq)
 		unlock(&sched.lock)
 		startIdle(n)
-		qsize -= n
 	}
 
-	if !q.empty() {
-		runqputbatch(pp, &q, qsize)
+	if runqputbatch(pp, &q); !q.empty() {
+		lock(&sched.lock)
+		globrunqputbatch(&q)
+		unlock(&sched.lock)
 	}
 
 	// Some P's might have become idle after we loaded `sched.npidle`
@@ -4024,7 +4133,6 @@ top:
 			unlock(&sched.lock)
 		} else {
 			sched.disable.runnable.pushBack(gp)
-			sched.disable.n++
 			unlock(&sched.lock)
 			goto top
 		}
@@ -4070,6 +4178,15 @@ func park_m(gp *g) {
 
 	trace := traceAcquire()
 
+	// If g is in a synctest group, we don't want to let the group
+	// become idle until after the waitunlockf (if any) has confirmed
+	// that the park is happening.
+	// We need to record gp.bubble here, since waitunlockf can change it.
+	bubble := gp.bubble
+	if bubble != nil {
+		bubble.incActive()
+	}
+
 	if trace.ok() {
 		// Trace the event before the transition. It may take a
 		// stack trace, but we won't own the stack after the
@@ -4092,6 +4209,9 @@ func park_m(gp *g) {
 		if !ok {
 			trace := traceAcquire()
 			casgstatus(gp, _Gwaiting, _Grunnable)
+			if bubble != nil {
+				bubble.decActive()
+			}
 			if trace.ok() {
 				trace.GoUnpark(gp, 2)
 				traceRelease(trace)
@@ -4099,6 +4219,11 @@ func park_m(gp *g) {
 			execute(gp, true) // Schedule it back, never returns.
 		}
 	}
+
+	if bubble != nil {
+		bubble.decActive()
+	}
+
 	schedule()
 }
 
@@ -4252,6 +4377,9 @@ func goyield_m(gp *g) {
 // Finishes execution of the current goroutine.
 func goexit1() {
 	if raceenabled {
+		if gp := getg(); gp.bubble != nil {
+			racereleasemergeg(gp, gp.bubble.raceaddr())
+		}
 		racegoend()
 	}
 	trace := traceAcquire()
@@ -4290,6 +4418,7 @@ func gdestroy(gp *g) {
 	gp.param = nil
 	gp.labels = nil
 	gp.timer = nil
+	gp.bubble = nil
 
 	if gcBlackenEnabled != 0 && gp.gcAssistBytes > 0 {
 		// Flush assist credit to the global pool. This gives
@@ -4310,6 +4439,9 @@ func gdestroy(gp *g) {
 
 	if locked && mp.lockedInt != 0 {
 		print("runtime: mp.lockedInt = ", mp.lockedInt, "\n")
+		if mp.isextra {
+			throw("runtime.Goexit called in a thread that was not created by the Go runtime")
+		}
 		throw("exited a goroutine internally locked to the OS thread")
 	}
 	gfput(pp, gp)
@@ -4353,7 +4485,6 @@ func save(pc, sp, bp uintptr) {
 	gp.sched.pc = pc
 	gp.sched.sp = sp
 	gp.sched.lr = 0
-	gp.sched.ret = 0
 	gp.sched.bp = bp
 	// We need to ensure ctxt is zero, but can't have a write
 	// barrier here. However, it should always already be zero.
@@ -4415,7 +4546,13 @@ func reentersyscall(pc, sp, bp uintptr) {
 	}
 	if gp.syscallsp < gp.stack.lo || gp.stack.hi < gp.syscallsp {
 		systemstack(func() {
-			print("entersyscall inconsistent ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscall inconsistent sp ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			throw("entersyscall")
+		})
+	}
+	if gp.syscallbp != 0 && gp.syscallbp < gp.stack.lo || gp.stack.hi < gp.syscallbp {
+		systemstack(func() {
+			print("entersyscall inconsistent bp ", hex(gp.syscallbp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscall")
 		})
 	}
@@ -4476,7 +4613,7 @@ func entersyscall() {
 	// the stack. This results in exceeding the nosplit stack requirements
 	// on some platforms.
 	fp := getcallerfp()
-	reentersyscall(getcallerpc(), getcallersp(), fp)
+	reentersyscall(sys.GetCallerPC(), sys.GetCallerSP(), fp)
 }
 
 func entersyscall_sysmon() {
@@ -4541,8 +4678,8 @@ func entersyscallblock() {
 	gp.m.p.ptr().syscalltick++
 
 	// Leave SP around for GC and traceback.
-	pc := getcallerpc()
-	sp := getcallersp()
+	pc := sys.GetCallerPC()
+	sp := sys.GetCallerSP()
 	bp := getcallerfp()
 	save(pc, sp, bp)
 	gp.syscallsp = gp.sched.sp
@@ -4553,14 +4690,20 @@ func entersyscallblock() {
 		sp2 := gp.sched.sp
 		sp3 := gp.syscallsp
 		systemstack(func() {
-			print("entersyscallblock inconsistent ", hex(sp1), " ", hex(sp2), " ", hex(sp3), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscallblock inconsistent sp ", hex(sp1), " ", hex(sp2), " ", hex(sp3), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscallblock")
 		})
 	}
 	casgstatus(gp, _Grunning, _Gsyscall)
 	if gp.syscallsp < gp.stack.lo || gp.stack.hi < gp.syscallsp {
 		systemstack(func() {
-			print("entersyscallblock inconsistent ", hex(sp), " ", hex(gp.sched.sp), " ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscallblock inconsistent sp ", hex(sp), " ", hex(gp.sched.sp), " ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			throw("entersyscallblock")
+		})
+	}
+	if gp.syscallbp != 0 && gp.syscallbp < gp.stack.lo || gp.stack.hi < gp.syscallbp {
+		systemstack(func() {
+			print("entersyscallblock inconsistent bp ", hex(bp), " ", hex(gp.sched.bp), " ", hex(gp.syscallbp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscallblock")
 		})
 	}
@@ -4568,7 +4711,7 @@ func entersyscallblock() {
 	systemstack(entersyscallblock_handoff)
 
 	// Resave for traceback during blocked call.
-	save(getcallerpc(), getcallersp(), getcallerfp())
+	save(sys.GetCallerPC(), sys.GetCallerSP(), getcallerfp())
 
 	gp.m.locks--
 }
@@ -4606,7 +4749,7 @@ func exitsyscall() {
 	gp := getg()
 
 	gp.m.locks++ // see comment in entersyscall
-	if getcallersp() > gp.syscallsp {
+	if sys.GetCallerSP() > gp.syscallsp {
 		throw("exitsyscall: syscall frame is no longer valid")
 	}
 
@@ -4635,7 +4778,7 @@ func exitsyscall() {
 				trace.GoSysExit(lostP)
 				if lostP {
 					// We lost the P at some point, even though we got it back here.
-					// Trace that we're starting again, because there was a traceGoSysBlock
+					// Trace that we're starting again, because there was a tracev2.GoSysBlock
 					// call somewhere in exitsyscallfast (indicating that this goroutine
 					// had blocked) and we're about to start running again.
 					trace.GoStart()
@@ -4732,7 +4875,7 @@ func exitsyscallfast_reacquired(trace traceLocker) {
 	if gp.m.syscalltick != gp.m.p.ptr().syscalltick {
 		if trace.ok() {
 			// The p was retaken and then enter into syscall again (since gp.m.syscalltick has changed).
-			// traceGoSysBlock for this syscall was already emitted,
+			// tracev2.GoSysBlock for this syscall was already emitted,
 			// but here we effectively retake the p from the new syscall running on the same p.
 			systemstack(func() {
 				// We're stealing the P. It's treated
@@ -4822,7 +4965,6 @@ func exitsyscall0(gp *g) {
 // syscall_runtime_BeforeFork is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.
@@ -4852,7 +4994,6 @@ func syscall_runtime_BeforeFork() {
 // syscall_runtime_AfterFork is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.
@@ -4886,7 +5027,6 @@ var inForkedChild bool
 // syscall_runtime_AfterForkInChild is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.
@@ -4946,6 +5086,9 @@ func malg(stacksize int32) *g {
 		stacksize = round2(stackSystem + stacksize)
 		systemstack(func() {
 			newg.stack = stackalloc(uint32(stacksize))
+			if valgrindenabled {
+				newg.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(newg.stack.lo), unsafe.Pointer(newg.stack.hi))
+			}
 		})
 		newg.stackguard0 = newg.stack.lo + stackGuard
 		newg.stackguard1 = ^uintptr(0)
@@ -4961,7 +5104,7 @@ func malg(stacksize int32) *g {
 // The compiler turns a go statement into a call to this.
 func newproc(fn *funcval) {
 	gp := getg()
-	pc := getcallerpc()
+	pc := sys.GetCallerPC()
 	systemstack(func() {
 		newg := newproc1(fn, gp, pc, false, waitReasonZero)
 
@@ -5021,10 +5164,12 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 	newg.gopc = callerpc
 	newg.ancestors = saveAncestors(callergp)
 	newg.startpc = fn.fn
+	newg.runningCleanups.Store(false)
 	if isSystemGoroutine(newg, false) {
 		sched.ngsys.Add(1)
 	} else {
-		// Only user goroutines inherit pprof labels.
+		// Only user goroutines inherit synctest groups and pprof labels.
+		newg.bubble = callergp.bubble
 		if mp.curg != nil {
 			newg.labels = mp.curg.labels
 		}
@@ -5051,7 +5196,6 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 		status = _Gwaiting
 		newg.waitreason = waitreason
 	}
-	casgstatus(newg, _Gdead, status)
 	if pp.goidcache == pp.goidcacheend {
 		// Sched.goidgen is the last allocated id,
 		// this batch must be [sched.goidgen+1, sched.goidgen+GoidCacheBatch].
@@ -5061,6 +5205,7 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 		pp.goidcacheend = pp.goidcache + _GoidCacheBatch
 	}
 	newg.goid = pp.goidcache
+	casgstatus(newg, _Gdead, status)
 	pp.goidcache++
 	newg.trace.reset()
 	if trace.ok() {
@@ -5132,30 +5277,29 @@ func gfput(pp *p, gp *g) {
 		gp.stack.lo = 0
 		gp.stack.hi = 0
 		gp.stackguard0 = 0
+		if valgrindenabled {
+			valgrindDeregisterStack(gp.valgrindStackID)
+			gp.valgrindStackID = 0
+		}
 	}
 
 	pp.gFree.push(gp)
-	pp.gFree.n++
-	if pp.gFree.n >= 64 {
+	if pp.gFree.size >= 64 {
 		var (
-			inc      int32
 			stackQ   gQueue
 			noStackQ gQueue
 		)
-		for pp.gFree.n >= 32 {
+		for pp.gFree.size >= 32 {
 			gp := pp.gFree.pop()
-			pp.gFree.n--
 			if gp.stack.lo == 0 {
 				noStackQ.push(gp)
 			} else {
 				stackQ.push(gp)
 			}
-			inc++
 		}
 		lock(&sched.gFree.lock)
 		sched.gFree.noStack.pushAll(noStackQ)
 		sched.gFree.stack.pushAll(stackQ)
-		sched.gFree.n += inc
 		unlock(&sched.gFree.lock)
 	}
 }
@@ -5167,7 +5311,7 @@ retry:
 	if pp.gFree.empty() && (!sched.gFree.stack.empty() || !sched.gFree.noStack.empty()) {
 		lock(&sched.gFree.lock)
 		// Move a batch of free Gs to the P.
-		for pp.gFree.n < 32 {
+		for pp.gFree.size < 32 {
 			// Prefer Gs with stacks.
 			gp := sched.gFree.stack.pop()
 			if gp == nil {
@@ -5176,9 +5320,7 @@ retry:
 					break
 				}
 			}
-			sched.gFree.n--
 			pp.gFree.push(gp)
-			pp.gFree.n++
 		}
 		unlock(&sched.gFree.lock)
 		goto retry
@@ -5187,7 +5329,6 @@ retry:
 	if gp == nil {
 		return nil
 	}
-	pp.gFree.n--
 	if gp.stack.lo != 0 && gp.stack.hi-gp.stack.lo != uintptr(startingStackSize) {
 		// Deallocate old stack. We kept it in gfput because it was the
 		// right size when the goroutine was put on the free list, but
@@ -5197,12 +5338,19 @@ retry:
 			gp.stack.lo = 0
 			gp.stack.hi = 0
 			gp.stackguard0 = 0
+			if valgrindenabled {
+				valgrindDeregisterStack(gp.valgrindStackID)
+				gp.valgrindStackID = 0
+			}
 		})
 	}
 	if gp.stack.lo == 0 {
 		// Stack was deallocated in gfput or just above. Allocate a new one.
 		systemstack(func() {
 			gp.stack = stackalloc(startingStackSize)
+			if valgrindenabled {
+				gp.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(gp.stack.lo), unsafe.Pointer(gp.stack.hi))
+			}
 		})
 		gp.stackguard0 = gp.stack.lo + stackGuard
 	} else {
@@ -5222,24 +5370,20 @@ retry:
 // Purge all cached G's from gfree list to the global list.
 func gfpurge(pp *p) {
 	var (
-		inc      int32
 		stackQ   gQueue
 		noStackQ gQueue
 	)
 	for !pp.gFree.empty() {
 		gp := pp.gFree.pop()
-		pp.gFree.n--
 		if gp.stack.lo == 0 {
 			noStackQ.push(gp)
 		} else {
 			stackQ.push(gp)
 		}
-		inc++
 	}
 	lock(&sched.gFree.lock)
 	sched.gFree.noStack.pushAll(noStackQ)
 	sched.gFree.stack.pushAll(stackQ)
-	sched.gFree.n += inc
 	unlock(&sched.gFree.lock)
 }
 
@@ -5355,9 +5499,9 @@ func badunlockosthread() {
 }
 
 func gcount() int32 {
-	n := int32(atomic.Loaduintptr(&allglen)) - sched.gFree.n - sched.ngsys.Load()
+	n := int32(atomic.Loaduintptr(&allglen)) - sched.gFree.stack.size - sched.gFree.noStack.size - sched.ngsys.Load()
 	for _, pp := range allp {
-		n -= pp.gFree.n
+		n -= pp.gFree.size
 	}
 
 	// All these variables can be changed concurrently, so the result can be inconsistent.
@@ -5615,14 +5759,10 @@ func (pp *p) destroy() {
 		wbBufFlush1(pp)
 		pp.gcw.dispose()
 	}
-	for i := range pp.sudogbuf {
-		pp.sudogbuf[i] = nil
-	}
+	clear(pp.sudogbuf[:])
 	pp.sudogcache = pp.sudogbuf[:0]
 	pp.pinnerCache = nil
-	for j := range pp.deferpoolbuf {
-		pp.deferpoolbuf[j] = nil
-	}
+	clear(pp.deferpoolbuf[:])
 	pp.deferpool = pp.deferpoolbuf[:0]
 	systemstack(func() {
 		for i := 0; i < pp.mspancache.len; i++ {
@@ -5657,6 +5797,8 @@ func (pp *p) destroy() {
 		pp.raceprocctx = 0
 	}
 	pp.gcAssistTime = 0
+	gcCleanups.queued += pp.cleanupsQueued
+	pp.cleanupsQueued = 0
 	pp.status = _Pdead
 }
 
@@ -5913,7 +6055,9 @@ func checkdead() {
 	// For -buildmode=c-shared or -buildmode=c-archive it's OK if
 	// there are no running goroutines. The calling program is
 	// assumed to be running.
-	if islibrary || isarchive {
+	// One exception is Wasm, which is single-threaded. If we are
+	// in Go and all goroutines are blocked, it deadlocks.
+	if (islibrary || isarchive) && GOARCH != "wasm" {
 		return
 	}
 
@@ -6034,6 +6178,7 @@ func sysmon() {
 	checkdead()
 	unlock(&sched.lock)
 
+	lastgomaxprocs := int64(0)
 	lasttrace := int64(0)
 	idle := 0 // how many cycles in succession we had not wokeup somebody
 	delay := uint32(0)
@@ -6146,6 +6291,11 @@ func sysmon() {
 			if next := timeSleepUntil(); next < now {
 				startm(nil, false, false)
 			}
+		}
+		// Check if we need to update GOMAXPROCS at most once per second.
+		if debug.updatemaxprocs != 0 && lastgomaxprocs+1e9 <= now {
+			sysmonUpdateGOMAXPROCS()
+			lastgomaxprocs = now
 		}
 		if scavenger.sysmonWake.Load() != 0 {
 			// Kick the scavenger awake if someone requested it.
@@ -6325,7 +6475,7 @@ func schedtrace(detailed bool) {
 	}
 
 	lock(&sched.lock)
-	print("SCHED ", (now-starttime)/1e6, "ms: gomaxprocs=", gomaxprocs, " idleprocs=", sched.npidle.Load(), " threads=", mcount(), " spinningthreads=", sched.nmspinning.Load(), " needspinning=", sched.needspinning.Load(), " idlethreads=", sched.nmidle, " runqueue=", sched.runqsize)
+	print("SCHED ", (now-starttime)/1e6, "ms: gomaxprocs=", gomaxprocs, " idleprocs=", sched.npidle.Load(), " threads=", mcount(), " spinningthreads=", sched.nmspinning.Load(), " needspinning=", sched.needspinning.Load(), " idlethreads=", sched.nmidle, " runqueue=", sched.runq.size)
 	if detailed {
 		print(" gcwaiting=", sched.gcwaiting.Load(), " nmidlelocked=", sched.nmidlelocked, " stopwait=", sched.stopwait, " sysmonwait=", sched.sysmonwait.Load(), "\n")
 	}
@@ -6333,29 +6483,39 @@ func schedtrace(detailed bool) {
 	// Even if we hold schedlock, most data can be changed concurrently.
 	// E.g. (p->m ? p->m->id : -1) can crash if p->m changes from non-nil to nil.
 	for i, pp := range allp {
-		mp := pp.m.ptr()
 		h := atomic.Load(&pp.runqhead)
 		t := atomic.Load(&pp.runqtail)
 		if detailed {
 			print("  P", i, ": status=", pp.status, " schedtick=", pp.schedtick, " syscalltick=", pp.syscalltick, " m=")
+			mp := pp.m.ptr()
 			if mp != nil {
 				print(mp.id)
 			} else {
 				print("nil")
 			}
-			print(" runqsize=", t-h, " gfreecnt=", pp.gFree.n, " timerslen=", len(pp.timers.heap), "\n")
+			print(" runqsize=", t-h, " gfreecnt=", pp.gFree.size, " timerslen=", len(pp.timers.heap), "\n")
 		} else {
 			// In non-detailed mode format lengths of per-P run queues as:
-			// [len1 len2 len3 len4]
+			// [ len1 len2 len3 len4 ]
 			print(" ")
 			if i == 0 {
-				print("[")
+				print("[ ")
 			}
 			print(t - h)
 			if i == len(allp)-1 {
-				print("]\n")
+				print(" ]")
 			}
 		}
+	}
+
+	if !detailed {
+		// Format per-P schedticks as: schedticks=[ tick1 tick2 tick3 tick4 ].
+		print(" schedticks=[ ")
+		for _, pp := range allp {
+			print(pp.schedtick)
+			print(" ")
+		}
+		print("]\n")
 	}
 
 	if !detailed {
@@ -6404,6 +6564,169 @@ func schedtrace(detailed bool) {
 	unlock(&sched.lock)
 }
 
+type updateMaxProcsGState struct {
+	lock mutex
+	g    *g
+	idle atomic.Bool
+
+	// Readable when idle == false, writable when idle == true.
+	procs int32 // new GOMAXPROCS value
+}
+
+var (
+	// GOMAXPROCS update godebug metric. Incremented if automatic
+	// GOMAXPROCS updates actually change the value of GOMAXPROCS.
+	updatemaxprocs = &godebugInc{name: "updatemaxprocs"}
+
+	// Synchronization and state between updateMaxProcsGoroutine and
+	// sysmon.
+	updateMaxProcsG updateMaxProcsGState
+
+	// Synchronization between GOMAXPROCS and sysmon.
+	//
+	// Setting GOMAXPROCS via a call to GOMAXPROCS disables automatic
+	// GOMAXPROCS updates.
+	//
+	// We want to make two guarantees to callers of GOMAXPROCS. After
+	// GOMAXPROCS returns:
+	//
+	// 1. The runtime will not make any automatic changes to GOMAXPROCS.
+	//
+	// 2. The runtime will not perform any of the system calls used to
+	//    determine the appropriate value of GOMAXPROCS (i.e., it won't
+	//    call defaultGOMAXPROCS).
+	//
+	// (1) is the baseline guarantee that everyone needs. The GOMAXPROCS
+	// API isn't useful to anyone if automatic updates may occur after it
+	// returns. This is easily achieved by double-checking the state under
+	// STW before committing an automatic GOMAXPROCS update.
+	//
+	// (2) doesn't matter to most users, as it is isn't observable as long
+	// as (1) holds. However, it can be important to users sandboxing Go.
+	// They want disable these system calls and need some way to know when
+	// they are guaranteed the calls will stop.
+	//
+	// This would be simple to achieve if we simply called
+	// defaultGOMAXPROCS under STW in updateMaxProcsGoroutine below.
+	// However, we would like to avoid scheduling this goroutine every
+	// second when it will almost never do anything. Instead, sysmon calls
+	// defaultGOMAXPROCS to decide whether to schedule
+	// updateMaxProcsGoroutine. Thus we need to synchronize between sysmon
+	// and GOMAXPROCS calls.
+	//
+	// GOMAXPROCS can't hold a runtime mutex across STW. It could hold a
+	// semaphore, but sysmon cannot take semaphores. Instead, we have a
+	// more complex scheme:
+	//
+	// * sysmon holds computeMaxProcsLock while calling defaultGOMAXPROCS.
+	// * sysmon skips the current update if sched.customGOMAXPROCS is
+	//   set.
+	// * GOMAXPROCS sets sched.customGOMAXPROCS once it is committed to
+	//   changing GOMAXPROCS.
+	// * GOMAXPROCS takes computeMaxProcsLock to wait for outstanding
+	//   defaultGOMAXPROCS calls to complete.
+	//
+	// N.B. computeMaxProcsLock could simply be sched.lock, but we want to
+	// avoid holding that lock during the potentially slow
+	// defaultGOMAXPROCS.
+	computeMaxProcsLock mutex
+)
+
+// Start GOMAXPROCS update helper goroutine.
+//
+// This is based on forcegchelper.
+func defaultGOMAXPROCSUpdateEnable() {
+	if debug.updatemaxprocs == 0 {
+		// Unconditionally increment the metric when updates are disabled.
+		//
+		// It would be more descriptive if we did a dry run of the
+		// complete update, determining the appropriate value of
+		// GOMAXPROCS and the bailing out and just incrementing the
+		// metric if a change would occur.
+		//
+		// Not only is that a lot of ongoing work for a disabled
+		// feature, but some users need to be able to completely
+		// disable the update system calls (such as sandboxes).
+		// Currently, updatemaxprocs=0 serves that purpose.
+		updatemaxprocs.IncNonDefault()
+		return
+	}
+
+	go updateMaxProcsGoroutine()
+}
+
+func updateMaxProcsGoroutine() {
+	updateMaxProcsG.g = getg()
+	lockInit(&updateMaxProcsG.lock, lockRankUpdateMaxProcsG)
+	for {
+		lock(&updateMaxProcsG.lock)
+		if updateMaxProcsG.idle.Load() {
+			throw("updateMaxProcsGoroutine: phase error")
+		}
+		updateMaxProcsG.idle.Store(true)
+		goparkunlock(&updateMaxProcsG.lock, waitReasonUpdateGOMAXPROCSIdle, traceBlockSystemGoroutine, 1)
+		// This goroutine is explicitly resumed by sysmon.
+
+		stw := stopTheWorldGC(stwGOMAXPROCS)
+
+		// Still OK to update?
+		lock(&sched.lock)
+		custom := sched.customGOMAXPROCS
+		unlock(&sched.lock)
+		if custom {
+			startTheWorldGC(stw)
+			return
+		}
+
+		// newprocs will be processed by startTheWorld
+		//
+		// TODO(prattmic): this could use a nicer API. Perhaps add it to the
+		// stw parameter?
+		newprocs = updateMaxProcsG.procs
+		lock(&sched.lock)
+		sched.customGOMAXPROCS = false
+		unlock(&sched.lock)
+
+		startTheWorldGC(stw)
+	}
+}
+
+func sysmonUpdateGOMAXPROCS() {
+	// Synchronize with GOMAXPROCS. See comment on computeMaxProcsLock.
+	lock(&computeMaxProcsLock)
+
+	// No update if GOMAXPROCS was set manually.
+	lock(&sched.lock)
+	custom := sched.customGOMAXPROCS
+	curr := gomaxprocs
+	unlock(&sched.lock)
+	if custom {
+		unlock(&computeMaxProcsLock)
+		return
+	}
+
+	// Don't hold sched.lock while we read the filesystem.
+	procs := defaultGOMAXPROCS(0)
+	unlock(&computeMaxProcsLock)
+	if procs == curr {
+		// Nothing to do.
+		return
+	}
+
+	// Sysmon can't directly stop the world. Run the helper to do so on our
+	// behalf. If updateGOMAXPROCS.idle is false, then a previous update is
+	// still pending.
+	if updateMaxProcsG.idle.Load() {
+		lock(&updateMaxProcsG.lock)
+		updateMaxProcsG.procs = procs
+		updateMaxProcsG.idle.Store(false)
+		var list gList
+		list.push(updateMaxProcsG.g)
+		injectglist(&list)
+		unlock(&updateMaxProcsG.lock)
+	}
+}
+
 // schedEnableUser enables or disables the scheduling of user
 // goroutines.
 //
@@ -6417,9 +6740,8 @@ func schedEnableUser(enable bool) {
 	}
 	sched.disable.user = !enable
 	if enable {
-		n := sched.disable.n
-		sched.disable.n = 0
-		globrunqputbatch(&sched.disable.runnable, n)
+		n := sched.disable.runnable.size
+		globrunqputbatch(&sched.disable.runnable)
 		unlock(&sched.lock)
 		for ; n != 0 && sched.npidle.Load() != 0; n-- {
 			startm(nil, false, false)
@@ -6481,7 +6803,6 @@ func globrunqput(gp *g) {
 	assertLockHeld(&sched.lock)
 
 	sched.runq.pushBack(gp)
-	sched.runqsize++
 }
 
 // Put gp at the head of the global runnable queue.
@@ -6493,7 +6814,6 @@ func globrunqputhead(gp *g) {
 	assertLockHeld(&sched.lock)
 
 	sched.runq.push(gp)
-	sched.runqsize++
 }
 
 // Put a batch of runnable goroutines on the global runnable queue.
@@ -6502,43 +6822,44 @@ func globrunqputhead(gp *g) {
 // May run during STW, so write barriers are not allowed.
 //
 //go:nowritebarrierrec
-func globrunqputbatch(batch *gQueue, n int32) {
+func globrunqputbatch(batch *gQueue) {
 	assertLockHeld(&sched.lock)
 
 	sched.runq.pushBackAll(*batch)
-	sched.runqsize += n
 	*batch = gQueue{}
+}
+
+// Try get a single G from the global runnable queue.
+// sched.lock must be held.
+func globrunqget() *g {
+	assertLockHeld(&sched.lock)
+
+	if sched.runq.size == 0 {
+		return nil
+	}
+
+	return sched.runq.pop()
 }
 
 // Try get a batch of G's from the global runnable queue.
 // sched.lock must be held.
-func globrunqget(pp *p, max int32) *g {
+func globrunqgetbatch(n int32) (gp *g, q gQueue) {
 	assertLockHeld(&sched.lock)
 
-	if sched.runqsize == 0 {
-		return nil
+	if sched.runq.size == 0 {
+		return
 	}
 
-	n := sched.runqsize/gomaxprocs + 1
-	if n > sched.runqsize {
-		n = sched.runqsize
-	}
-	if max > 0 && n > max {
-		n = max
-	}
-	if n > int32(len(pp.runq))/2 {
-		n = int32(len(pp.runq)) / 2
-	}
+	n = min(n, sched.runq.size, sched.runq.size/gomaxprocs+1)
 
-	sched.runqsize -= n
-
-	gp := sched.runq.pop()
+	gp = sched.runq.pop()
 	n--
+
 	for ; n > 0; n-- {
 		gp1 := sched.runq.pop()
-		runqput(pp, gp1, false)
+		q.pushBack(gp1)
 	}
-	return gp
+	return
 }
 
 // pMask is an atomic bitstring with one bit per P.
@@ -6755,22 +7076,23 @@ func runqputslow(pp *p, gp *g, h, t uint32) bool {
 	for i := uint32(0); i < n; i++ {
 		batch[i].schedlink.set(batch[i+1])
 	}
-	var q gQueue
-	q.head.set(batch[0])
-	q.tail.set(batch[n])
+
+	q := gQueue{batch[0].guintptr(), batch[n].guintptr(), int32(n + 1)}
 
 	// Now put the batch on global queue.
 	lock(&sched.lock)
-	globrunqputbatch(&q, int32(n+1))
+	globrunqputbatch(&q)
 	unlock(&sched.lock)
 	return true
 }
 
 // runqputbatch tries to put all the G's on q on the local runnable queue.
-// If the queue is full, they are put on the global queue; in that case
-// this will temporarily acquire the scheduler lock.
+// If the local runq is full the input queue still contains unqueued Gs.
 // Executed only by the owner P.
-func runqputbatch(pp *p, q *gQueue, qsize int) {
+func runqputbatch(pp *p, q *gQueue) {
+	if q.empty() {
+		return
+	}
 	h := atomic.LoadAcq(&pp.runqhead)
 	t := pp.runqtail
 	n := uint32(0)
@@ -6780,7 +7102,6 @@ func runqputbatch(pp *p, q *gQueue, qsize int) {
 		t++
 		n++
 	}
-	qsize -= int(n)
 
 	if randomizeScheduler {
 		off := func(o uint32) uint32 {
@@ -6793,11 +7114,8 @@ func runqputbatch(pp *p, q *gQueue, qsize int) {
 	}
 
 	atomic.StoreRel(&pp.runqtail, t)
-	if !q.empty() {
-		lock(&sched.lock)
-		globrunqputbatch(q, int32(qsize))
-		unlock(&sched.lock)
-	}
+
+	return
 }
 
 // Get g from local runnable queue.
@@ -6829,11 +7147,10 @@ func runqget(pp *p) (gp *g, inheritTime bool) {
 
 // runqdrain drains the local runnable queue of pp and returns all goroutines in it.
 // Executed only by the owner P.
-func runqdrain(pp *p) (drainQ gQueue, n uint32) {
+func runqdrain(pp *p) (drainQ gQueue) {
 	oldNext := pp.runnext
 	if oldNext != 0 && pp.runnext.cas(oldNext, 0) {
 		drainQ.pushBack(oldNext.ptr())
-		n++
 	}
 
 retry:
@@ -6861,7 +7178,6 @@ retry:
 	for i := uint32(0); i < qn; i++ {
 		gp := pp.runq[(h+i)%uint32(len(pp.runq))].ptr()
 		drainQ.pushBack(gp)
-		n++
 	}
 	return
 }
@@ -6949,6 +7265,7 @@ func runqsteal(pp, p2 *p, stealRunNextG bool) *g {
 type gQueue struct {
 	head guintptr
 	tail guintptr
+	size int32
 }
 
 // empty reports whether q is empty.
@@ -6963,6 +7280,7 @@ func (q *gQueue) push(gp *g) {
 	if q.tail == 0 {
 		q.tail.set(gp)
 	}
+	q.size++
 }
 
 // pushBack adds gp to the tail of q.
@@ -6974,6 +7292,7 @@ func (q *gQueue) pushBack(gp *g) {
 		q.head.set(gp)
 	}
 	q.tail.set(gp)
+	q.size++
 }
 
 // pushBackAll adds all Gs in q2 to the tail of q. After this q2 must
@@ -6989,6 +7308,7 @@ func (q *gQueue) pushBackAll(q2 gQueue) {
 		q.head = q2.head
 	}
 	q.tail = q2.tail
+	q.size += q2.size
 }
 
 // pop removes and returns the head of queue q. It returns nil if
@@ -7000,13 +7320,14 @@ func (q *gQueue) pop() *g {
 		if q.head == 0 {
 			q.tail = 0
 		}
+		q.size--
 	}
 	return gp
 }
 
 // popList takes all Gs in q and returns them as a gList.
 func (q *gQueue) popList() gList {
-	stack := gList{q.head}
+	stack := gList{q.head, q.size}
 	*q = gQueue{}
 	return stack
 }
@@ -7015,6 +7336,7 @@ func (q *gQueue) popList() gList {
 // on one gQueue or gList at a time.
 type gList struct {
 	head guintptr
+	size int32
 }
 
 // empty reports whether l is empty.
@@ -7026,13 +7348,15 @@ func (l *gList) empty() bool {
 func (l *gList) push(gp *g) {
 	gp.schedlink = l.head
 	l.head.set(gp)
+	l.size++
 }
 
-// pushAll prepends all Gs in q to l.
+// pushAll prepends all Gs in q to l. After this q must not be used.
 func (l *gList) pushAll(q gQueue) {
 	if !q.empty() {
 		q.tail.ptr().schedlink = l.head
 		l.head = q.head
+		l.size += q.size
 	}
 }
 
@@ -7041,6 +7365,7 @@ func (l *gList) pop() *g {
 	gp := l.head.ptr()
 	if gp != nil {
 		l.head = gp.schedlink
+		l.size--
 	}
 	return gp
 }
@@ -7122,6 +7447,31 @@ func sync_atomic_runtime_procUnpin() {
 
 // Active spinning for sync.Mutex.
 //
+//go:linkname internal_sync_runtime_canSpin internal/sync.runtime_canSpin
+//go:nosplit
+func internal_sync_runtime_canSpin(i int) bool {
+	// sync.Mutex is cooperative, so we are conservative with spinning.
+	// Spin only few times and only if running on a multicore machine and
+	// GOMAXPROCS>1 and there is at least one other running P and local runq is empty.
+	// As opposed to runtime mutex we don't do passive spinning here,
+	// because there can be work on global runq or on other Ps.
+	if i >= active_spin || numCPUStartup <= 1 || gomaxprocs <= sched.npidle.Load()+sched.nmspinning.Load()+1 {
+		return false
+	}
+	if p := getg().m.p.ptr(); !runqempty(p) {
+		return false
+	}
+	return true
+}
+
+//go:linkname internal_sync_runtime_doSpin internal/sync.runtime_doSpin
+//go:nosplit
+func internal_sync_runtime_doSpin() {
+	procyield(active_spin_cnt)
+}
+
+// Active spinning for sync.Mutex.
+//
 // sync_runtime_canSpin should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
@@ -7135,18 +7485,7 @@ func sync_atomic_runtime_procUnpin() {
 //go:linkname sync_runtime_canSpin sync.runtime_canSpin
 //go:nosplit
 func sync_runtime_canSpin(i int) bool {
-	// sync.Mutex is cooperative, so we are conservative with spinning.
-	// Spin only few times and only if running on a multicore machine and
-	// GOMAXPROCS>1 and there is at least one other running P and local runq is empty.
-	// As opposed to runtime mutex we don't do passive spinning here,
-	// because there can be work on global runq or on other Ps.
-	if i >= active_spin || ncpu <= 1 || gomaxprocs <= sched.npidle.Load()+sched.nmspinning.Load()+1 {
-		return false
-	}
-	if p := getg().m.p.ptr(); !runqempty(p) {
-		return false
-	}
-	return true
+	return internal_sync_runtime_canSpin(i)
 }
 
 // sync_runtime_doSpin should be an internal detail,
@@ -7162,7 +7501,7 @@ func sync_runtime_canSpin(i int) bool {
 //go:linkname sync_runtime_doSpin sync.runtime_doSpin
 //go:nosplit
 func sync_runtime_doSpin() {
-	procyield(active_spin_cnt)
+	internal_sync_runtime_doSpin()
 }
 
 var stealOrder randomOrder

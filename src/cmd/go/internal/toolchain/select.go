@@ -6,11 +6,14 @@
 package toolchain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"go/build"
+	"internal/godebug"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -26,6 +29,7 @@ import (
 	"cmd/go/internal/modload"
 	"cmd/go/internal/run"
 	"cmd/go/internal/work"
+	"cmd/internal/pathcache"
 	"cmd/internal/telemetry/counter"
 
 	"golang.org/x/mod/module"
@@ -83,6 +87,7 @@ func FilterEnv(env []string) []string {
 }
 
 var counterErrorsInvalidToolchainInFile = counter.New("go/errors:invalid-toolchain-in-file")
+var toolchainTrace = godebug.New("#toolchaintrace").Value() == "1"
 
 // Select invokes a different Go toolchain if directed by
 // the GOTOOLCHAIN environment variable or the user's configuration
@@ -136,6 +141,7 @@ func Select() {
 	minToolchain := gover.LocalToolchain()
 	minVers := gover.Local()
 	var mode string
+	var toolchainTraceBuffer bytes.Buffer
 	if gotoolchain == "auto" {
 		mode = "auto"
 	} else if gotoolchain == "path" {
@@ -157,10 +163,13 @@ func Select() {
 			base.Fatalf("invalid GOTOOLCHAIN %q: only version suffixes are +auto and +path", gotoolchain)
 		}
 		mode = suffix
+		if toolchainTrace {
+			fmt.Fprintf(&toolchainTraceBuffer, "go: default toolchain set to %s from GOTOOLCHAIN=%s\n", minToolchain, gotoolchain)
+		}
 	}
 
 	gotoolchain = minToolchain
-	if (mode == "auto" || mode == "path") && !goInstallVersion() {
+	if mode == "auto" || mode == "path" {
 		// Read go.mod to find new minimum and suggested toolchain.
 		file, goVers, toolchain := modGoToolchain()
 		gover.Startup.AutoFile = file
@@ -189,6 +198,13 @@ func Select() {
 					base.Fatalf("invalid toolchain %q in %s", toolchain, base.ShortPath(file))
 				}
 				if gover.Compare(toolVers, minVers) > 0 {
+					if toolchainTrace {
+						modeFormat := mode
+						if strings.Contains(cfg.Getenv("GOTOOLCHAIN"), "+") { // go1.2.3+auto
+							modeFormat = fmt.Sprintf("<name>+%s", mode)
+						}
+						fmt.Fprintf(&toolchainTraceBuffer, "go: upgrading toolchain to %s (required by toolchain line in %s; upgrade allowed by GOTOOLCHAIN=%s)\n", toolchain, base.ShortPath(file), modeFormat)
+					}
 					gotoolchain = toolchain
 					minVers = toolVers
 					gover.Startup.AutoToolchain = toolchain
@@ -196,6 +212,7 @@ func Select() {
 			}
 			if gover.Compare(goVers, minVers) > 0 {
 				gotoolchain = "go" + goVers
+				minVers = goVers
 				// Starting with Go 1.21, the first released version has a .0 patch version suffix.
 				// Don't try to download a language version (sans patch component), such as go1.22.
 				// Instead, use the first toolchain of that language version, such as 1.22.0.
@@ -205,8 +222,16 @@ func Select() {
 				}
 				gover.Startup.AutoGoVersion = goVers
 				gover.Startup.AutoToolchain = "" // in case we are overriding it for being too old
+				if toolchainTrace {
+					modeFormat := mode
+					if strings.Contains(cfg.Getenv("GOTOOLCHAIN"), "+") { // go1.2.3+auto
+						modeFormat = fmt.Sprintf("<name>+%s", mode)
+					}
+					fmt.Fprintf(&toolchainTraceBuffer, "go: upgrading toolchain to %s (required by go line in %s; upgrade allowed by GOTOOLCHAIN=%s)\n", gotoolchain, base.ShortPath(file), modeFormat)
+				}
 			}
 		}
+		maybeSwitchForGoInstallVersion(minVers)
 	}
 
 	// If we are invoked as a target toolchain, confirm that
@@ -236,8 +261,16 @@ func Select() {
 		return
 	}
 
+	if toolchainTrace {
+		// Flush toolchain tracing buffer only in the parent process (targetEnv is unset).
+		io.Copy(os.Stderr, &toolchainTraceBuffer)
+	}
+
 	if gotoolchain == "local" || gotoolchain == gover.LocalToolchain() {
 		// Let the current binary handle the command.
+		if toolchainTrace {
+			fmt.Fprintf(os.Stderr, "go: using local toolchain %s\n", gover.LocalToolchain())
+		}
 		return
 	}
 
@@ -308,7 +341,7 @@ func Exec(gotoolchain string) {
 	// Look in PATH for the toolchain before we download one.
 	// This allows custom toolchains as well as reuse of toolchains
 	// already installed using go install golang.org/dl/go1.2.3@latest.
-	if exe, err := cfg.LookPath(gotoolchain); err == nil {
+	if exe, err := pathcache.LookPath(gotoolchain); err == nil {
 		execGoToolchain(gotoolchain, "", exe)
 	}
 
@@ -352,13 +385,20 @@ func Exec(gotoolchain string) {
 			base.Fatalf("download %s: %v", gotoolchain, err)
 		}
 		if info.Mode()&0111 == 0 {
-			// allowExec sets the exec permission bits on all files found in dir.
-			allowExec := func(dir string) {
+			// allowExec sets the exec permission bits on all files found in dir if pattern is the empty string,
+			// or only those files that match the pattern if it's non-empty.
+			allowExec := func(dir, pattern string) {
 				err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 					if err != nil {
 						return err
 					}
 					if !d.IsDir() {
+						if pattern != "" {
+							if matched, _ := filepath.Match(pattern, d.Name()); !matched {
+								// Skip file.
+								return nil
+							}
+						}
 						info, err := os.Stat(path)
 						if err != nil {
 							return err
@@ -379,12 +419,13 @@ func Exec(gotoolchain string) {
 			// then the check of bin/go above might succeed, the other go command
 			// would skip its own mode-setting, and then the go command might
 			// try to run a tool before we get to setting the bits on pkg/tool.
-			// Setting pkg/tool before bin/go avoids that ordering problem.
+			// Setting pkg/tool and lib before bin/go avoids that ordering problem.
 			// The only other tool the go command invokes is gofmt,
 			// so we set that one explicitly before handling bin (which will include bin/go).
-			allowExec(filepath.Join(dir, "pkg/tool"))
-			allowExec(filepath.Join(dir, "bin/gofmt"))
-			allowExec(filepath.Join(dir, "bin"))
+			allowExec(filepath.Join(dir, "pkg/tool"), "")
+			allowExec(filepath.Join(dir, "lib"), "go_?*_?*_exec")
+			allowExec(filepath.Join(dir, "bin/gofmt"), "")
+			allowExec(filepath.Join(dir, "bin"), "")
 		}
 	}
 
@@ -508,21 +549,21 @@ func modGoToolchain() (file, goVers, toolchain string) {
 	return file, gover.GoModLookup(data, "go"), gover.GoModLookup(data, "toolchain")
 }
 
-// goInstallVersion reports whether the command line is go install m@v or go run m@v.
-// If so, Select must not read the go.mod or go.work file in "auto" or "path" mode.
-func goInstallVersion() bool {
+// maybeSwitchForGoInstallVersion reports whether the command line is go install m@v or go run m@v.
+// If so, switch to the go version required to build m@v if it's higher than minVers.
+func maybeSwitchForGoInstallVersion(minVers string) {
 	// Note: We assume there are no flags between 'go' and 'install' or 'run'.
 	// During testing there are some debugging flags that are accepted
 	// in that position, but in production go binaries there are not.
 	if len(os.Args) < 3 {
-		return false
+		return
 	}
 
 	var cmdFlags *flag.FlagSet
 	switch os.Args[1] {
 	default:
 		// Command doesn't support a pkg@version as the main module.
-		return false
+		return
 	case "install":
 		cmdFlags = &work.CmdInstall.Flag
 	case "run":
@@ -556,7 +597,7 @@ func goInstallVersion() bool {
 		args = args[1:]
 		if a == "--" {
 			if len(args) == 0 {
-				return false
+				return
 			}
 			pkgArg = args[0]
 			break
@@ -577,7 +618,7 @@ func goInstallVersion() bool {
 				val = "true"
 			}
 			if err := modcacherwVal.Set(val); err != nil {
-				return false
+				return
 			}
 			modcacherwSeen = true
 			continue
@@ -597,8 +638,8 @@ func goInstallVersion() bool {
 				// because it is preceded by run flags and followed by arguments to the
 				// program being run. Since we don't know whether this flag takes
 				// an argument, we can't reliably identify the end of the run flags.
-				// Just give up and let the user clarify using the "=" form..
-				return false
+				// Just give up and let the user clarify using the "=" form.
+				return
 			}
 
 			// We would like to let 'go install -newflag pkg@version' work even
@@ -627,11 +668,11 @@ func goInstallVersion() bool {
 	}
 
 	if !strings.Contains(pkgArg, "@") || build.IsLocalImport(pkgArg) || filepath.IsAbs(pkgArg) {
-		return false
+		return
 	}
 	path, version, _ := strings.Cut(pkgArg, "@")
 	if path == "" || version == "" || gover.IsToolchain(path) {
-		return false
+		return
 	}
 
 	if !modcacherwSeen && base.InGOFLAGS("-modcacherw") {
@@ -640,9 +681,8 @@ func goInstallVersion() bool {
 		base.SetFromGOFLAGS(fs)
 	}
 
-	// It would be correct to simply return true here, bypassing use
-	// of the current go.mod or go.work, and let "go run" or "go install"
-	// do the rest, including a toolchain switch.
+	// It would be correct to do nothing here, and let "go run" or "go install"
+	// do the toolchain switch.
 	// Our goal instead is, since we have gone to the trouble of handling
 	// unknown flags to some degree, to run the switch now, so that
 	// these commands can switch to a newer toolchain directed by the
@@ -669,8 +709,10 @@ func goInstallVersion() bool {
 	if errors.Is(err, gover.ErrTooNew) {
 		// Run early switch, same one go install or go run would eventually do,
 		// if it understood all the command-line flags.
-		SwitchOrFatal(ctx, err)
+		var s Switcher
+		s.Error(err)
+		if s.TooNew != nil && gover.Compare(s.TooNew.GoVersion, minVers) > 0 {
+			SwitchOrFatal(ctx, err)
+		}
 	}
-
-	return true // pkg@version found
 }

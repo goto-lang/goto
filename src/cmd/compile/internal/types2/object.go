@@ -14,9 +14,15 @@ import (
 	"unicode/utf8"
 )
 
-// An Object describes a named language entity such as a package,
-// constant, type, variable, function (incl. methods), or label.
-// All objects implement the Object interface.
+// An Object is a named language entity.
+// An Object may be a constant ([Const]), type name ([TypeName]),
+// variable or struct field ([Var]), function or method ([Func]),
+// imported package ([PkgName]), label ([Label]),
+// built-in function ([Builtin]),
+// or the predeclared identifier 'nil' ([Nil]).
+//
+// The environment, which is structured as a tree of Scopes,
+// maps each name to the unique Object that it denotes.
 type Object interface {
 	Parent() *Scope  // scope in which this object is declared; nil for methods and struct fields
 	Pos() syntax.Pos // position of object identifier in declaration
@@ -27,6 +33,7 @@ type Object interface {
 	Id() string      // object name if exported, qualified name if not exported (see func Id)
 
 	// String returns a human-readable string of the object.
+	// Use [ObjectString] to control how package names are formatted in the string.
 	String() string
 
 	// order reflects a package-level object's source order: if object
@@ -186,40 +193,48 @@ func (obj *object) sameId(pkg *Package, name string, foldCase bool) bool {
 	return samePkg(obj.pkg, pkg)
 }
 
-// less reports whether object a is ordered before object b.
+// cmp reports whether object a is ordered before object b.
+// cmp returns:
+//
+//	-1 if a is before b
+//	 0 if a is equivalent to b
+//	+1 if a is behind b
 //
 // Objects are ordered nil before non-nil, exported before
 // non-exported, then by name, and finally (for non-exported
 // functions) by package path.
-func (a *object) less(b *object) bool {
+func (a *object) cmp(b *object) int {
 	if a == b {
-		return false
+		return 0
 	}
 
 	// Nil before non-nil.
 	if a == nil {
-		return true
+		return -1
 	}
 	if b == nil {
-		return false
+		return +1
 	}
 
 	// Exported functions before non-exported.
 	ea := isExported(a.name)
 	eb := isExported(b.name)
 	if ea != eb {
-		return ea
+		if ea {
+			return -1
+		}
+		return +1
 	}
 
 	// Order by name and then (for non-exported names) by package.
 	if a.name != b.name {
-		return a.name < b.name
+		return strings.Compare(a.name, b.name)
 	}
 	if !ea {
-		return a.pkg.path < b.pkg.path
+		return strings.Compare(a.pkg.path, b.pkg.path)
 	}
 
-	return false
+	return 0
 }
 
 // A PkgName represents an imported Go package.
@@ -227,13 +242,12 @@ func (a *object) less(b *object) bool {
 type PkgName struct {
 	object
 	imported *Package
-	used     bool // set if the package was used
 }
 
 // NewPkgName returns a new PkgName object representing an imported package.
 // The remaining arguments set the attributes found with all Objects.
 func NewPkgName(pos syntax.Pos, pkg *Package, name string, imported *Package) *PkgName {
-	return &PkgName{object{nil, pos, pkg, name, Typ[Invalid], 0, black, nopos}, imported, false}
+	return &PkgName{object{nil, pos, pkg, name, Typ[Invalid], 0, black, nopos}, imported}
 }
 
 // Imported returns the package that was imported.
@@ -257,7 +271,11 @@ func (obj *Const) Val() constant.Value { return obj.val }
 
 func (*Const) isDependency() {} // a constant may be a dependency of an initialization expression
 
-// A TypeName represents a name for a (defined or alias) type.
+// A TypeName is an [Object] that represents a type with a name:
+// a defined type ([Named]),
+// an alias type ([Alias]),
+// a type parameter ([TypeParam]),
+// or a predeclared type such as int or error.
 type TypeName struct {
 	object
 }
@@ -312,28 +330,78 @@ func (obj *TypeName) IsAlias() bool {
 // A Variable represents a declared variable (including function parameters and results, and struct fields).
 type Var struct {
 	object
-	embedded bool // if set, the variable is an embedded struct field, and name is the type name
-	isField  bool // var is struct field
-	used     bool // set if the variable was used
 	origin   *Var // if non-nil, the Var from which this one was instantiated
+	kind     VarKind
+	embedded bool // if set, the variable is an embedded struct field, and name is the type name
 }
+
+// A VarKind discriminates the various kinds of variables.
+type VarKind uint8
+
+const (
+	_          VarKind = iota // (not meaningful)
+	PackageVar                // a package-level variable
+	LocalVar                  // a local variable
+	RecvVar                   // a method receiver variable
+	ParamVar                  // a function parameter variable
+	ResultVar                 // a function result variable
+	FieldVar                  // a struct field
+)
+
+var varKindNames = [...]string{
+	0:          "VarKind(0)",
+	PackageVar: "PackageVar",
+	LocalVar:   "LocalVar",
+	RecvVar:    "RecvVar",
+	ParamVar:   "ParamVar",
+	ResultVar:  "ResultVar",
+	FieldVar:   "FieldVar",
+}
+
+func (kind VarKind) String() string {
+	if 0 <= kind && int(kind) < len(varKindNames) {
+		return varKindNames[kind]
+	}
+	return fmt.Sprintf("VarKind(%d)", kind)
+}
+
+// Kind reports what kind of variable v is.
+func (v *Var) Kind() VarKind { return v.kind }
+
+// SetKind sets the kind of the variable.
+// It should be used only immediately after [NewVar] or [NewParam].
+func (v *Var) SetKind(kind VarKind) { v.kind = kind }
 
 // NewVar returns a new variable.
 // The arguments set the attributes found with all Objects.
+//
+// The caller must subsequently call [Var.SetKind]
+// if the desired Var is not of kind [PackageVar].
 func NewVar(pos syntax.Pos, pkg *Package, name string, typ Type) *Var {
-	return &Var{object: object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}}
+	return newVar(PackageVar, pos, pkg, name, typ)
 }
 
 // NewParam returns a new variable representing a function parameter.
+//
+// The caller must subsequently call [Var.SetKind] if the desired Var
+// is not of kind [ParamVar]: for example, [RecvVar] or [ResultVar].
 func NewParam(pos syntax.Pos, pkg *Package, name string, typ Type) *Var {
-	return &Var{object: object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}, used: true} // parameters are always 'used'
+	return newVar(ParamVar, pos, pkg, name, typ)
 }
 
 // NewField returns a new variable representing a struct field.
 // For embedded fields, the name is the unqualified type name
 // under which the field is accessible.
 func NewField(pos syntax.Pos, pkg *Package, name string, typ Type, embedded bool) *Var {
-	return &Var{object: object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}, embedded: embedded, isField: true}
+	v := newVar(FieldVar, pos, pkg, name, typ)
+	v.embedded = embedded
+	return v
+}
+
+// newVar returns a new variable.
+// The arguments set the attributes found with all Objects.
+func newVar(kind VarKind, pos syntax.Pos, pkg *Package, name string, typ Type) *Var {
+	return &Var{object: object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}, kind: kind}
 }
 
 // Anonymous reports whether the variable is an embedded field.
@@ -344,7 +412,7 @@ func (obj *Var) Anonymous() bool { return obj.embedded }
 func (obj *Var) Embedded() bool { return obj.embedded }
 
 // IsField reports whether the variable is a struct field.
-func (obj *Var) IsField() bool { return obj.isField }
+func (obj *Var) IsField() bool { return obj.kind == FieldVar }
 
 // Origin returns the canonical Var for its receiver, i.e. the Var object
 // recorded in Info.Defs.
@@ -507,7 +575,7 @@ func writeObject(buf *bytes.Buffer, obj Object, qf Qualifier) {
 		}
 
 	case *Var:
-		if obj.isField {
+		if obj.IsField() {
 			buf.WriteString("field")
 		} else {
 			buf.WriteString("var")
@@ -555,7 +623,7 @@ func writeObject(buf *bytes.Buffer, obj Object, qf Qualifier) {
 			// Don't print anything more for basic types since there's
 			// no more information.
 			return
-		case *Named:
+		case genericType:
 			if t.TypeParams().Len() > 0 {
 				newTypeWriter(buf, qf).tParamList(t.TypeParams().list())
 			}

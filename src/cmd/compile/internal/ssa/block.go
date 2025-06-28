@@ -264,10 +264,7 @@ func (b *Block) resetWithControl2(kind BlockKind, v, w *Value) {
 // The values in b.Values after i must already have had their args reset,
 // to maintain correct value uses counts.
 func (b *Block) truncateValues(i int) {
-	tail := b.Values[i:]
-	for j := range tail {
-		tail[j] = nil
-	}
+	clear(b.Values[i:])
 	b.Values = b.Values[:i]
 }
 
@@ -364,6 +361,15 @@ func (b *Block) removePhiArg(phi *Value, i int) {
 	phi.Args[n] = nil
 	phi.Args = phi.Args[:n]
 	phielimValue(phi)
+}
+
+// uniquePred returns the predecessor of b, if there is exactly one.
+// Returns nil otherwise.
+func (b *Block) uniquePred() *Block {
+	if len(b.Preds) != 1 {
+		return nil
+	}
+	return b.Preds[0].b
 }
 
 // LackingPos indicates whether b is a block whose position should be inherited

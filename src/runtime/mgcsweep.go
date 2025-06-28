@@ -25,7 +25,6 @@
 package runtime
 
 import (
-	"internal/abi"
 	"internal/runtime/atomic"
 	"unsafe"
 )
@@ -170,13 +169,16 @@ func (a *activeSweep) end(sl sweepLocker) {
 			throw("mismatched begin/end of activeSweep")
 		}
 		if a.state.CompareAndSwap(state, state-1) {
-			if state != sweepDrainedMask {
+			if state-1 != sweepDrainedMask {
 				return
 			}
+			// We're the last sweeper, and there's nothing left to sweep.
 			if debug.gcpacertrace > 0 {
 				live := gcController.heapLive.Load()
 				print("pacer: sweep done at heap size ", live>>20, "MB; allocated ", (live-mheap_.sweepHeapLiveBasis)>>20, "MB during sweep; swept ", mheap_.pagesSwept.Load(), " pages at ", mheap_.sweepPagesPerByte, " pages/byte\n")
 			}
+			// Now that sweeping is completely done, flush remaining cleanups.
+			gcCleanups.flush()
 			return
 		}
 	}
@@ -311,6 +313,10 @@ func bgsweep(c chan int) {
 			// gosweepone returning ^0 above
 			// and the lock being acquired.
 			unlock(&sweep.lock)
+			// This goroutine must preempt when we have no work to do
+			// but isSweepDone returns false because of another existing sweeper.
+			// See issue #73499.
+			goschedIfBusy()
 			continue
 		}
 		sweep.parked = true
@@ -518,7 +524,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 
 	trace := traceAcquire()
 	if trace.ok() {
-		trace.GCSweepSpan(s.npages * _PageSize)
+		trace.GCSweepSpan(s.npages * pageSize)
 		traceRelease(trace)
 	}
 
@@ -565,7 +571,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 			}
 			if hasFinAndRevived {
 				// Pass 2: queue all finalizers and clear any weak handles. Weak handles are cleared
-				// before finalization as specified by the internal/weak package. See the documentation
+				// before finalization as specified by the weak package. See the documentation
 				// for that package for more details.
 				for siter.valid() && uintptr(siter.s.offset) < endOffset {
 					// Find the exact byte for which the special was setup
@@ -635,10 +641,18 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 				if asanenabled && !s.isUserArenaChunk {
 					asanpoison(unsafe.Pointer(x), size)
 				}
+				if valgrindenabled && !s.isUserArenaChunk {
+					valgrindFree(unsafe.Pointer(x))
+				}
 			}
 			mbits.advance()
 			abits.advance()
 		}
+	}
+
+	// Copy over the inline mark bits if necessary.
+	if gcUsesSpanInlineMarkBits(s.elemsize) {
+		s.mergeInlineMarks(s.gcmarkBits)
 	}
 
 	// Check for zombie objects.
@@ -689,6 +703,11 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 
 	// Initialize alloc bits cache.
 	s.refillAllocCache(0)
+
+	// Reset the object queue, if we have one.
+	if gcUsesSpanInlineMarkBits(s.elemsize) {
+		s.initInlineMarkBits()
+	}
 
 	// The span must be in our exclusive ownership until we update sweepgen,
 	// check for potential races.
@@ -818,18 +837,6 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 			} else {
 				mheap_.freeSpan(s)
 			}
-			if s.largeType != nil && s.largeType.TFlag&abi.TFlagUnrolledBitmap != 0 {
-				// The unrolled GCProg bitmap is allocated separately.
-				// Free the space for the unrolled bitmap.
-				systemstack(func() {
-					s := spanOf(uintptr(unsafe.Pointer(s.largeType)))
-					mheap_.freeManual(s, spanAllocPtrScalarBits)
-				})
-				// Make sure to zero this pointer without putting the old
-				// value in a write buffer, as the old value might be an
-				// invalid pointer. See arena.go:(*mheap).allocUserArenaChunk.
-				*(*uintptr)(unsafe.Pointer(&s.largeType)) = 0
-			}
 			return true
 		}
 
@@ -855,7 +862,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 // pointer to that object and marked it.
 func (s *mspan) reportZombies() {
 	printlock()
-	print("runtime: marked free object in span ", s, ", elemsize=", s.elemsize, " freeindex=", s.freeindex, " (bad use of unsafe.Pointer? try -d=checkptr)\n")
+	print("runtime: marked free object in span ", s, ", elemsize=", s.elemsize, " freeindex=", s.freeindex, " (bad use of unsafe.Pointer or having race conditions? try -d=checkptr or -race)\n")
 	mbits := s.markBitsForBase()
 	abits := s.allocBitsForIndex(0)
 	for i := uintptr(0); i < uintptr(s.nelems); i++ {
@@ -994,9 +1001,9 @@ func gcPaceSweeper(trigger uint64) {
 		// concurrent sweep are less likely to leave pages
 		// unswept when GC starts.
 		heapDistance -= 1024 * 1024
-		if heapDistance < _PageSize {
+		if heapDistance < pageSize {
 			// Avoid setting the sweep ratio extremely high
-			heapDistance = _PageSize
+			heapDistance = pageSize
 		}
 		pagesSwept := mheap_.pagesSwept.Load()
 		pagesInUse := mheap_.pagesInUse.Load()

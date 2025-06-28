@@ -223,16 +223,21 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 			p5.From.Reg = out
 		}
 
-	case ssa.OpPPC64LoweredAtomicExchange32,
+	case ssa.OpPPC64LoweredAtomicExchange8,
+		ssa.OpPPC64LoweredAtomicExchange32,
 		ssa.OpPPC64LoweredAtomicExchange64:
 		// LWSYNC
-		// LDAR/LWAR    (Rarg0), Rout
-		// STDCCC/STWCCC Rout, (Rarg0)
+		// LDAR/LWAR/LBAR        (Rarg0), Rout
+		// STDCCC/STWCCC/STBWCCC Rout, (Rarg0)
 		// BNE         -2(PC)
 		// ISYNC
 		ld := ppc64.ALDAR
 		st := ppc64.ASTDCCC
-		if v.Op == ssa.OpPPC64LoweredAtomicExchange32 {
+		switch v.Op {
+		case ssa.OpPPC64LoweredAtomicExchange8:
+			ld = ppc64.ALBAR
+			st = ppc64.ASTBCCC
+		case ssa.OpPPC64LoweredAtomicExchange32:
 			ld = ppc64.ALWAR
 			st = ppc64.ASTWCCC
 		}
@@ -243,13 +248,13 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		// caching-inhibited. See Appendix B.2.2.2 in the ISA 2.07b.
 		plwsync := s.Prog(ppc64.ALWSYNC)
 		plwsync.To.Type = obj.TYPE_NONE
-		// LDAR or LWAR
+		// L[B|W|D]AR
 		p := s.Prog(ld)
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = r0
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = out
-		// STDCCC or STWCCC
+		// ST[B|W|D]CCC
 		p1 := s.Prog(st)
 		p1.From.Type = obj.TYPE_REG
 		p1.From.Reg = r1
@@ -594,7 +599,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.To.Reg = r
 
 	case ssa.OpPPC64ADDCC, ssa.OpPPC64ANDCC, ssa.OpPPC64SUBCC, ssa.OpPPC64ORCC, ssa.OpPPC64XORCC, ssa.OpPPC64NORCC,
-		ssa.OpPPC64ANDNCC:
+		ssa.OpPPC64ANDNCC, ssa.OpPPC64MULHDUCC:
 		r1 := v.Args[0].Reg()
 		r2 := v.Args[1].Reg()
 		p := s.Prog(v.Op.Asm())
@@ -1998,26 +2003,7 @@ var blockJump = [...]struct {
 
 func ssaGenBlock(s *ssagen.State, b, next *ssa.Block) {
 	switch b.Kind {
-	case ssa.BlockDefer:
-		// defer returns in R3:
-		// 0 if we should continue executing
-		// 1 if we should jump to deferreturn call
-		p := s.Prog(ppc64.ACMP)
-		p.From.Type = obj.TYPE_REG
-		p.From.Reg = ppc64.REG_R3
-		p.To.Type = obj.TYPE_CONST
-		p.To.Offset = 0
-
-		p = s.Prog(ppc64.ABNE)
-		p.To.Type = obj.TYPE_BRANCH
-		s.Branches = append(s.Branches, ssagen.Branch{P: p, B: b.Succs[1].Block()})
-		if b.Succs[0].Block() != next {
-			p := s.Prog(obj.AJMP)
-			p.To.Type = obj.TYPE_BRANCH
-			s.Branches = append(s.Branches, ssagen.Branch{P: p, B: b.Succs[0].Block()})
-		}
-
-	case ssa.BlockPlain:
+	case ssa.BlockPlain, ssa.BlockDefer:
 		if b.Succs[0].Block() != next {
 			p := s.Prog(obj.AJMP)
 			p.To.Type = obj.TYPE_BRANCH

@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/token"
 	"io/fs"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -598,10 +599,11 @@ var parseDepthTests = []struct {
 	{name: "chan2", format: "package main; var x «<-chan »int"},
 	{name: "interface", format: "package main; var x «interface { M() «int» }»", scope: true, scopeMultiplier: 2}, // Scopes: InterfaceType, FuncType
 	{name: "map", format: "package main; var x «map[int]»int"},
-	{name: "slicelit", format: "package main; var x = «[]any{«»}»", parseMultiplier: 2},             // Parser nodes: UnaryExpr, CompositeLit
-	{name: "arraylit", format: "package main; var x = «[1]any{«nil»}»", parseMultiplier: 2},         // Parser nodes: UnaryExpr, CompositeLit
-	{name: "structlit", format: "package main; var x = «struct{x any}{«nil»}»", parseMultiplier: 2}, // Parser nodes: UnaryExpr, CompositeLit
-	{name: "maplit", format: "package main; var x = «map[int]any{1:«nil»}»", parseMultiplier: 2},    // Parser nodes: CompositeLit, KeyValueExpr
+	{name: "slicelit", format: "package main; var x = []any{«[]any{«»}»}", parseMultiplier: 3},      // Parser nodes: UnaryExpr, CompositeLit
+	{name: "arraylit", format: "package main; var x = «[1]any{«nil»}»", parseMultiplier: 3},         // Parser nodes: UnaryExpr, CompositeLit
+	{name: "structlit", format: "package main; var x = «struct{x any}{«nil»}»", parseMultiplier: 3}, // Parser nodes: UnaryExpr, CompositeLit
+	{name: "maplit", format: "package main; var x = «map[int]any{1:«nil»}»", parseMultiplier: 3},    // Parser nodes: CompositeLit, KeyValueExpr
+	{name: "element", format: "package main; var x = struct{x any}{x: «{«»}»}"},
 	{name: "dot", format: "package main; var x = «x.»x"},
 	{name: "index", format: "package main; var x = x«[1]»"},
 	{name: "slice", format: "package main; var x = x«[1:2]»"},
@@ -631,6 +633,7 @@ var parseDepthTests = []struct {
 	{name: "go", format: "package main; func main() { «go func() { «» }()» }", parseMultiplier: 2, scope: true},                      // Parser nodes: GoStmt, FuncLit
 	{name: "defer", format: "package main; func main() { «defer func() { «» }()» }", parseMultiplier: 2, scope: true},                // Parser nodes: DeferStmt, FuncLit
 	{name: "select", format: "package main; func main() { «select { default: «» }» }", scope: true},
+	{name: "block", format: "package main; func main() { «{«»}» }", scope: true},
 }
 
 // split splits pre«mid»post into pre, mid, post.
@@ -819,5 +822,77 @@ func TestIssue57490(t *testing.T) {
 	offset := tokFile.Offset(funcEnd)
 	if offset != tokFile.Size() {
 		t.Fatalf("offset = %d, want %d", offset, tokFile.Size())
+	}
+}
+
+func TestParseTypeParamsAsParenExpr(t *testing.T) {
+	const src = "package p; type X[A (B),] struct{}"
+
+	fset := token.NewFileSet()
+	f, err := ParseFile(fset, "test.go", src, ParseComments|SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typeParam := f.Decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec).TypeParams.List[0].Type
+	_, ok := typeParam.(*ast.ParenExpr)
+	if !ok {
+		t.Fatalf("typeParam is a %T; want: *ast.ParenExpr", typeParam)
+	}
+}
+
+// TestEmptyFileHasValidStartEnd is a regression test for #70162.
+func TestEmptyFileHasValidStartEnd(t *testing.T) {
+	for _, test := range []struct {
+		src  string
+		want string // "Pos() FileStart FileEnd"
+	}{
+		{src: "", want: "0 1 1"},
+		{src: "package ", want: "0 1 9"},
+		{src: "package p", want: "1 1 10"},
+		{src: "type T int", want: "0 1 11"},
+	} {
+		fset := token.NewFileSet()
+		f, _ := ParseFile(fset, "a.go", test.src, 0)
+		got := fmt.Sprintf("%d %d %d", f.Pos(), f.FileStart, f.FileEnd)
+		if got != test.want {
+			t.Fatalf("src = %q: got %s, want %s", test.src, got, test.want)
+		}
+	}
+}
+
+func TestCommentGroupWithLineDirective(t *testing.T) {
+	const src = `package main
+func test() {
+//line a:15:1
+	//
+}
+`
+	fset := token.NewFileSet()
+	f, err := ParseFile(fset, "test.go", src, ParseComments|SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantCommentGroups := []*ast.CommentGroup{
+		{
+			List: []*ast.Comment{
+				{
+					Slash: token.Pos(28),
+					Text:  "//line a:15:1",
+				},
+				{
+					Slash: token.Pos(43),
+					Text:  "//",
+				},
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(f.Comments, wantCommentGroups) {
+		var got, want strings.Builder
+		ast.Fprint(&got, fset, f.Comments, nil)
+		ast.Fprint(&want, fset, wantCommentGroups, nil)
+		t.Fatalf("unexpected f.Comments got:\n%v\nwant:\n%v", got.String(), want.String())
 	}
 }

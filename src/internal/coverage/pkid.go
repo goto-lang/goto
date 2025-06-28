@@ -26,9 +26,9 @@ package coverage
 //    slot: 1 path='internal/goarch'  hard-coded id: 2
 //    slot: 2 path='internal/runtime/atomic'  hard-coded id: 3
 //    slot: 3 path='internal/goos'
-//    slot: 4 path='runtime/internal/sys'  hard-coded id: 5
+//    slot: 4 path='internal/runtime/sys'  hard-coded id: 5
 //    slot: 5 path='internal/abi'  hard-coded id: 4
-//    slot: 6 path='runtime/internal/math'  hard-coded id: 6
+//    slot: 6 path='internal/runtime/math'  hard-coded id: 6
 //    slot: 7 path='internal/bytealg'  hard-coded id: 7
 //    slot: 8 path='internal/goexperiment'
 //    slot: 9 path='internal/runtime/syscall'  hard-coded id: 8
@@ -45,17 +45,30 @@ package coverage
 // as opposed to a fixed list.
 
 var rtPkgs = [...]string{
+	"internal/asan",
+	"internal/byteorder",
+	"internal/coverage/rtcov",
 	"internal/cpu",
-	"internal/goarch",
-	"internal/runtime/atomic",
-	"internal/goos",
-	"internal/chacha8rand",
-	"runtime/internal/sys",
-	"internal/abi",
-	"runtime/internal/math",
 	"internal/bytealg",
+	"internal/goarch",
+	"internal/abi",
+	"internal/chacha8rand",
+	"internal/godebugs",
 	"internal/goexperiment",
+	"internal/goos",
+	"internal/msan",
+	"internal/profilerecord",
+	"internal/race",
+	"internal/runtime/atomic",
+	"internal/runtime/exithook",
+	"internal/runtime/gc",
+	"internal/runtime/math",
+	"internal/runtime/strconv",
+	"internal/runtime/sys",
+	"internal/runtime/maps",
 	"internal/runtime/syscall",
+	"internal/runtime/cgroup",
+	"internal/stringslite",
 	"runtime",
 }
 

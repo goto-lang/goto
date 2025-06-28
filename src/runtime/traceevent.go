@@ -8,89 +8,8 @@ package runtime
 
 import (
 	"internal/abi"
-	"runtime/internal/sys"
-)
-
-// Event types in the trace, args are given in square brackets.
-//
-// Naming scheme:
-//   - Time range event pairs have suffixes "Begin" and "End".
-//   - "Start", "Stop", "Create", "Destroy", "Block", "Unblock"
-//     are suffixes reserved for scheduling resources.
-//
-// NOTE: If you add an event type, make sure you also update all
-// tables in this file!
-type traceEv uint8
-
-const (
-	traceEvNone traceEv = iota // unused
-
-	// Structural events.
-	traceEvEventBatch // start of per-M batch of events [generation, M ID, timestamp, batch length]
-	traceEvStacks     // start of a section of the stack table [...traceEvStack]
-	traceEvStack      // stack table entry [ID, ...{PC, func string ID, file string ID, line #}]
-	traceEvStrings    // start of a section of the string dictionary [...traceEvString]
-	traceEvString     // string dictionary entry [ID, length, string]
-	traceEvCPUSamples // start of a section of CPU samples [...traceEvCPUSample]
-	traceEvCPUSample  // CPU profiling sample [timestamp, M ID, P ID, goroutine ID, stack ID]
-	traceEvFrequency  // timestamp units per sec [freq]
-
-	// Procs.
-	traceEvProcsChange // current value of GOMAXPROCS [timestamp, GOMAXPROCS, stack ID]
-	traceEvProcStart   // start of P [timestamp, P ID, P seq]
-	traceEvProcStop    // stop of P [timestamp]
-	traceEvProcSteal   // P was stolen [timestamp, P ID, P seq, M ID]
-	traceEvProcStatus  // P status at the start of a generation [timestamp, P ID, status]
-
-	// Goroutines.
-	traceEvGoCreate            // goroutine creation [timestamp, new goroutine ID, new stack ID, stack ID]
-	traceEvGoCreateSyscall     // goroutine appears in syscall (cgo callback) [timestamp, new goroutine ID]
-	traceEvGoStart             // goroutine starts running [timestamp, goroutine ID, goroutine seq]
-	traceEvGoDestroy           // goroutine ends [timestamp]
-	traceEvGoDestroySyscall    // goroutine ends in syscall (cgo callback) [timestamp]
-	traceEvGoStop              // goroutine yields its time, but is runnable [timestamp, reason, stack ID]
-	traceEvGoBlock             // goroutine blocks [timestamp, reason, stack ID]
-	traceEvGoUnblock           // goroutine is unblocked [timestamp, goroutine ID, goroutine seq, stack ID]
-	traceEvGoSyscallBegin      // syscall enter [timestamp, P seq, stack ID]
-	traceEvGoSyscallEnd        // syscall exit [timestamp]
-	traceEvGoSyscallEndBlocked // syscall exit and it blocked at some point [timestamp]
-	traceEvGoStatus            // goroutine status at the start of a generation [timestamp, goroutine ID, M ID, status]
-
-	// STW.
-	traceEvSTWBegin // STW start [timestamp, kind]
-	traceEvSTWEnd   // STW done [timestamp]
-
-	// GC events.
-	traceEvGCActive           // GC active [timestamp, seq]
-	traceEvGCBegin            // GC start [timestamp, seq, stack ID]
-	traceEvGCEnd              // GC done [timestamp, seq]
-	traceEvGCSweepActive      // GC sweep active [timestamp, P ID]
-	traceEvGCSweepBegin       // GC sweep start [timestamp, stack ID]
-	traceEvGCSweepEnd         // GC sweep done [timestamp, swept bytes, reclaimed bytes]
-	traceEvGCMarkAssistActive // GC mark assist active [timestamp, goroutine ID]
-	traceEvGCMarkAssistBegin  // GC mark assist start [timestamp, stack ID]
-	traceEvGCMarkAssistEnd    // GC mark assist done [timestamp]
-	traceEvHeapAlloc          // gcController.heapLive change [timestamp, heap alloc in bytes]
-	traceEvHeapGoal           // gcController.heapGoal() change [timestamp, heap goal in bytes]
-
-	// Annotations.
-	traceEvGoLabel         // apply string label to current running goroutine [timestamp, label string ID]
-	traceEvUserTaskBegin   // trace.NewTask [timestamp, internal task ID, internal parent task ID, name string ID, stack ID]
-	traceEvUserTaskEnd     // end of a task [timestamp, internal task ID, stack ID]
-	traceEvUserRegionBegin // trace.{Start,With}Region [timestamp, internal task ID, name string ID, stack ID]
-	traceEvUserRegionEnd   // trace.{End,With}Region [timestamp, internal task ID, name string ID, stack ID]
-	traceEvUserLog         // trace.Log [timestamp, internal task ID, key string ID, stack, value string ID]
-
-	// Coroutines.
-	traceEvGoSwitch        // goroutine switch (coroswitch) [timestamp, goroutine ID, goroutine seq]
-	traceEvGoSwitchDestroy // goroutine switch and destroy [timestamp, goroutine ID, goroutine seq]
-	traceEvGoCreateBlocked // goroutine creation (starts blocked) [timestamp, new goroutine ID, new stack ID, stack ID]
-
-	// GoStatus with stack.
-	traceEvGoStatusStack // goroutine status at the start of a generation, with a stack [timestamp, goroutine ID, M ID, status, stack ID]
-
-	// Batch event for an experimental batch with a custom format.
-	traceEvExperimentalBatch // start of extra data [experiment ID, generation, M ID, timestamp, batch length, batch data...]
+	"internal/runtime/sys"
+	"internal/trace/tracev2"
 )
 
 // traceArg is a simple wrapper type to help ensure that arguments passed
@@ -102,7 +21,7 @@ type traceArg uint64
 // See the comment on traceWriter about style for more details as to why
 // this type and its methods are structured the way they are.
 type traceEventWriter struct {
-	w traceWriter
+	tl traceLocker
 }
 
 // eventWriter creates a new traceEventWriter. It is the main entrypoint for writing trace events.
@@ -117,56 +36,20 @@ type traceEventWriter struct {
 // been Runnable before a GoStart). Otherwise, callers can query the status of either the goroutine
 // or P and pass the appropriate status.
 //
-// In this case, the default status should be traceGoBad or traceProcBad to help identify bugs sooner.
-func (tl traceLocker) eventWriter(goStatus traceGoStatus, procStatus traceProcStatus) traceEventWriter {
-	w := tl.writer()
+// In this case, the default status should be tracev2.GoBad or tracev2.ProcBad to help identify bugs sooner.
+func (tl traceLocker) eventWriter(goStatus tracev2.GoStatus, procStatus tracev2.ProcStatus) traceEventWriter {
 	if pp := tl.mp.p.ptr(); pp != nil && !pp.trace.statusWasTraced(tl.gen) && pp.trace.acquireStatus(tl.gen) {
-		w = w.writeProcStatus(uint64(pp.id), procStatus, pp.trace.inSweep)
+		tl.writer().writeProcStatus(uint64(pp.id), procStatus, pp.trace.inSweep).end()
 	}
 	if gp := tl.mp.curg; gp != nil && !gp.trace.statusWasTraced(tl.gen) && gp.trace.acquireStatus(tl.gen) {
-		w = w.writeGoStatus(uint64(gp.goid), int64(tl.mp.procid), goStatus, gp.inMarkAssist, 0 /* no stack */)
+		tl.writer().writeGoStatus(uint64(gp.goid), int64(tl.mp.procid), goStatus, gp.inMarkAssist, 0 /* no stack */).end()
 	}
-	return traceEventWriter{w}
+	return traceEventWriter{tl}
 }
 
-// commit writes out a trace event and calls end. It's a helper to make the
-// common case of writing out a single event less error-prone.
-func (e traceEventWriter) commit(ev traceEv, args ...traceArg) {
-	e = e.write(ev, args...)
-	e.end()
-}
-
-// write writes an event into the trace.
-func (e traceEventWriter) write(ev traceEv, args ...traceArg) traceEventWriter {
-	e.w = e.w.event(ev, args...)
-	return e
-}
-
-// end finishes writing to the trace. The traceEventWriter must not be used after this call.
-func (e traceEventWriter) end() {
-	e.w.end()
-}
-
-// traceEventWrite is the part of traceEvent that actually writes the event.
-func (w traceWriter) event(ev traceEv, args ...traceArg) traceWriter {
-	// Make sure we have room.
-	w, _ = w.ensure(1 + (len(args)+1)*traceBytesPerNumber)
-
-	// Compute the timestamp diff that we'll put in the trace.
-	ts := traceClockNow()
-	if ts <= w.traceBuf.lastTime {
-		ts = w.traceBuf.lastTime + 1
-	}
-	tsDiff := uint64(ts - w.traceBuf.lastTime)
-	w.traceBuf.lastTime = ts
-
-	// Write out event.
-	w.byte(byte(ev))
-	w.varint(tsDiff)
-	for _, arg := range args {
-		w.varint(uint64(arg))
-	}
-	return w
+// event writes out a trace event.
+func (e traceEventWriter) event(ev tracev2.EventType, args ...traceArg) {
+	e.tl.writer().event(ev, args...).end()
 }
 
 // stack takes a stack trace skipping the provided number of frames.

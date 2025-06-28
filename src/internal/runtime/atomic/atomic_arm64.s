@@ -120,6 +120,30 @@ TEXT ·Store64(SB), NOSPLIT, $0-16
 	STLR	R1, (R0)
 	RET
 
+// uint8 Xchg(ptr *uint8, new uint8)
+// Atomically:
+//	old := *ptr;
+//	*ptr = new;
+//	return old;
+TEXT ·Xchg8(SB), NOSPLIT, $0-17
+	MOVD	ptr+0(FP), R0
+	MOVB	new+8(FP), R1
+#ifndef GOARM64_LSE
+	MOVBU	internal∕cpu·ARM64+const_offsetARM64HasATOMICS(SB), R4
+	CBZ 	R4, load_store_loop
+#endif
+	SWPALB	R1, (R0), R2
+	MOVB	R2, ret+16(FP)
+	RET
+#ifndef GOARM64_LSE
+load_store_loop:
+	LDAXRB	(R0), R2
+	STLXRB	R1, (R0), R3
+	CBNZ	R3, load_store_loop
+	MOVB	R2, ret+16(FP)
+	RET
+#endif
+
 // uint32 Xchg(ptr *uint32, new uint32)
 // Atomically:
 //	old := *ptr;
@@ -168,13 +192,14 @@ load_store_loop:
 	RET
 #endif
 
-// bool Cas(uint32 *ptr, uint32 old, uint32 new)
+// func Cas(ptr *uint32, old, new uint32) bool
 // Atomically:
-//	if(*val == old){
-//		*val = new;
-//		return 1;
-//	} else
-//		return 0;
+//	if *ptr == old {
+//		*ptr = new
+//		return true
+//	} else {
+//		return false
+// 	}
 TEXT ·Cas(SB), NOSPLIT, $0-17
 	MOVD	ptr+0(FP), R0
 	MOVW	old+8(FP), R1
@@ -202,14 +227,14 @@ ok:
 	RET
 #endif
 
-// bool ·Cas64(uint64 *ptr, uint64 old, uint64 new)
+// func Cas64(ptr *uint64, old, new uint64) bool
 // Atomically:
-//      if(*val == old){
-//              *val = new;
-//              return 1;
-//      } else {
-//              return 0;
-//      }
+//	if *ptr == old {
+//		*ptr = new
+//		return true
+//	} else {
+//		return false
+//	}
 TEXT ·Cas64(SB), NOSPLIT, $0-25
 	MOVD	ptr+0(FP), R0
 	MOVD	old+8(FP), R1

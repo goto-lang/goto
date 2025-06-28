@@ -57,11 +57,14 @@ const (
 	marshaledSize = len(magic) + 4
 )
 
-func (d *digest) MarshalBinary() ([]byte, error) {
-	b := make([]byte, 0, marshaledSize)
+func (d *digest) AppendBinary(b []byte) ([]byte, error) {
 	b = append(b, magic...)
-	b = byteorder.BeAppendUint32(b, uint32(*d))
+	b = byteorder.BEAppendUint32(b, uint32(*d))
 	return b, nil
+}
+
+func (d *digest) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(make([]byte, 0, marshaledSize))
 }
 
 func (d *digest) UnmarshalBinary(b []byte) error {
@@ -71,8 +74,13 @@ func (d *digest) UnmarshalBinary(b []byte) error {
 	if len(b) != marshaledSize {
 		return errors.New("hash/adler32: invalid hash state size")
 	}
-	*d = digest(byteorder.BeUint32(b[len(magic):]))
+	*d = digest(byteorder.BEUint32(b[len(magic):]))
 	return nil
+}
+
+func (d *digest) Clone() (hash.Cloner, error) {
+	r := *d
+	return &r, nil
 }
 
 // Add p to the running checksum d.

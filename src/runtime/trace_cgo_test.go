@@ -9,6 +9,7 @@ package runtime_test
 import (
 	"bytes"
 	"fmt"
+	"internal/race"
 	"internal/testenv"
 	"internal/trace"
 	"io"
@@ -26,6 +27,9 @@ func TestTraceUnwindCGO(t *testing.T) {
 		t.Skip("-quick")
 	}
 	testenv.MustHaveGoBuild(t)
+	if runtime.GOOS == "freebsd" && race.Enabled {
+		t.Skipf("race + cgo freebsd not supported. See https://go.dev/issue/73788.")
+	}
 	t.Parallel()
 
 	exe, err := buildTestProg(t, "testprogcgo")
@@ -94,10 +98,9 @@ func mustFindLogV2(t *testing.T, trc io.Reader, category string) trace.Event {
 // dumpStack returns e.Stack() as a string.
 func dumpStackV2(e *trace.Event) string {
 	var buf bytes.Buffer
-	e.Stack().Frames(func(f trace.StackFrame) bool {
+	for f := range e.Stack().Frames() {
 		file := strings.TrimPrefix(f.File, runtime.GOROOT())
 		fmt.Fprintf(&buf, "%s\n\t%s:%d\n", f.Func, file, f.Line)
-		return true
-	})
+	}
 	return buf.String()
 }

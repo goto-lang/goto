@@ -300,8 +300,8 @@ space-separated version list.
 
 The -retracted flag causes list to report information about retracted
 module versions. When -retracted is used with -f or -json, the Retracted
-field will be set to a string explaining why the version was retracted.
-The string is taken from comments on the retract directive in the
+field explains why the version was retracted.
+The strings are taken from comments on the retract directive in the
 module's go.mod file. When -retracted is used with -versions, retracted
 versions are listed together with unretracted versions. The -retracted
 flag may be used with or without -m.
@@ -345,10 +345,9 @@ For more about modules, see https://golang.org/ref/mod.
 
 func init() {
 	CmdList.Run = runList // break init cycle
-	work.AddBuildFlags(CmdList, work.DefaultBuildFlags)
-	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
-		work.AddCoverFlags(CmdList, nil)
-	}
+	// Omit build -json because list has its own -json
+	work.AddBuildFlags(CmdList, work.OmitJSONFlag)
+	work.AddCoverFlags(CmdList, nil)
 	CmdList.Flag.Var(&listJsonFields, "json", "")
 }
 
@@ -389,7 +388,7 @@ func (v *jsonFlag) Set(s string) error {
 }
 
 func (v *jsonFlag) String() string {
-	var fields []string
+	fields := make([]string, 0, len(*v))
 	for f := range *v {
 		fields = append(fields, f)
 	}
@@ -642,7 +641,6 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		for _, p := range pkgs {
 			if len(p.TestGoFiles)+len(p.XTestGoFiles) > 0 {
 				var pmain, ptest, pxtest *load.Package
-				var err error
 				if *listE {
 					sema.Acquire(ctx, 1)
 					wg.Add(1)
@@ -652,9 +650,10 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 					}
 					pmain, ptest, pxtest = load.TestPackagesAndErrors(ctx, done, pkgOpts, p, nil)
 				} else {
-					pmain, ptest, pxtest, err = load.TestPackagesFor(ctx, pkgOpts, p, nil)
-					if err != nil {
-						base.Fatalf("go: can't load test package: %s", err)
+					var perr *load.Package
+					pmain, ptest, pxtest, perr = load.TestPackagesFor(ctx, pkgOpts, p, nil)
+					if perr != nil {
+						base.Fatalf("go: can't load test package: %s", perr.Error)
 					}
 				}
 				testPackages = append(testPackages, testPackageSet{p, pmain, ptest, pxtest})
@@ -727,7 +726,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		b.IsCmdList = true
 		b.NeedExport = *listExport
 		b.NeedCompiledGoFiles = *listCompiled
-		if cfg.Experiment.CoverageRedesign && cfg.BuildCover {
+		if cfg.BuildCover {
 			load.PrepareForCoverageBuild(pkgs)
 		}
 		a := &work.Action{}
@@ -931,7 +930,7 @@ func collectDeps(p *load.Package) {
 	sort.Strings(p.Deps)
 }
 
-// collectDeps populates p.DepsErrors by iterating over p.Internal.Imports.
+// collectDepsErrors populates p.DepsErrors by iterating over p.Internal.Imports.
 // collectDepsErrors must be called on all of p's Imports before being called on p.
 func collectDepsErrors(p *load.Package) {
 	depsErrors := make(map[*load.PackageError]bool)
@@ -967,7 +966,7 @@ func collectDepsErrors(p *load.Package) {
 			return false
 		}
 		pathi, pathj := stki[len(stki)-1], stkj[len(stkj)-1]
-		return pathi < pathj
+		return pathi.Pkg < pathj.Pkg
 	})
 }
 

@@ -25,17 +25,22 @@ import (
 	"cmd/go/internal/fsys"
 	"cmd/go/internal/gover"
 	"cmd/go/internal/lockedfile"
-	"cmd/go/internal/par"
-	"cmd/go/internal/robustio"
 	"cmd/go/internal/str"
 	"cmd/go/internal/trace"
+	"cmd/internal/par"
+	"cmd/internal/robustio"
 
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/sumdb/dirhash"
 	modzip "golang.org/x/mod/zip"
 )
 
-var downloadCache par.ErrCache[module.Version, string] // version → directory
+// The downloadCache is used to cache the operation of downloading a module to disk
+// (if it's not already downloaded) and getting the directory it was downloaded to.
+// It is important that downloadCache must not be accessed by any of the exported
+// functions of this package after they return, because it can be modified by the
+// non-thread-safe SetState function
+var downloadCache = new(par.ErrCache[module.Version, string]) // version → directory;
 
 var ErrToolchain = errors.New("internal error: invalid operation on toolchain module")
 
@@ -72,6 +77,30 @@ func Download(ctx context.Context, mod module.Version) (dir string, err error) {
 	})
 }
 
+// Unzip is like Download but is given the explicit zip file to use,
+// rather than downloading it. This is used for the GOFIPS140 zip files,
+// which ship in the Go distribution itself.
+func Unzip(ctx context.Context, mod module.Version, zipfile string) (dir string, err error) {
+	if err := checkCacheDir(ctx); err != nil {
+		base.Fatal(err)
+	}
+
+	return downloadCache.Do(mod, func() (string, error) {
+		ctx, span := trace.StartSpan(ctx, "modfetch.Unzip "+mod.String())
+		defer span.Done()
+
+		dir, err = DownloadDir(ctx, mod)
+		if err == nil {
+			// The directory has already been completely extracted (no .partial file exists).
+			return dir, nil
+		} else if dir == "" || !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+
+		return unzip(ctx, mod, zipfile)
+	})
+}
+
 func download(ctx context.Context, mod module.Version) (dir string, err error) {
 	ctx, span := trace.StartSpan(ctx, "modfetch.download "+mod.String())
 	defer span.Done()
@@ -92,17 +121,21 @@ func download(ctx context.Context, mod module.Version) (dir string, err error) {
 		return "", err
 	}
 
+	return unzip(ctx, mod, zipfile)
+}
+
+func unzip(ctx context.Context, mod module.Version, zipfile string) (dir string, err error) {
 	unlock, err := lockVersion(ctx, mod)
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
 
-	ctx, span = trace.StartSpan(ctx, "unzip "+zipfile)
+	ctx, span := trace.StartSpan(ctx, "unzip "+zipfile)
 	defer span.Done()
 
 	// Check whether the directory was populated while we were waiting on the lock.
-	_, dirErr := DownloadDir(ctx, mod)
+	dir, dirErr := DownloadDir(ctx, mod)
 	if dirErr == nil {
 		return dir, nil
 	}
@@ -404,6 +437,10 @@ func RemoveAll(dir string) error {
 	return robustio.RemoveAll(dir)
 }
 
+// The GoSumFile, WorkspaceGoSumFiles, and goSum are global state that must not be
+// accessed by any of the exported functions of this package after they return, because
+// they can be modified by the non-thread-safe SetState function.
+
 var GoSumFile string             // path to go.sum; set by package modload
 var WorkspaceGoSumFiles []string // path to module go.sums in workspace; set by package modload
 
@@ -413,7 +450,11 @@ type modSum struct {
 }
 
 var goSum struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	sumState
+}
+
+type sumState struct {
 	m         map[module.Version][]string            // content of go.sum file
 	w         map[string]map[module.Version][]string // sum file in workspace -> content of that sum file
 	status    map[modSum]modSumStatus                // state of sums in m
@@ -425,26 +466,55 @@ type modSumStatus struct {
 	used, dirty bool
 }
 
+// State holds a snapshot of the global state of the modfetch package.
+type State struct {
+	goSumFile           string
+	workspaceGoSumFiles []string
+	lookupCache         *par.Cache[lookupCacheKey, Repo]
+	downloadCache       *par.ErrCache[module.Version, string]
+	sumState            sumState
+}
+
 // Reset resets globals in the modfetch package, so previous loads don't affect
 // contents of go.sum files.
 func Reset() {
-	GoSumFile = ""
-	WorkspaceGoSumFiles = nil
+	SetState(State{})
+}
 
+// SetState sets the global state of the modfetch package to the newState, and returns the previous
+// global state. newState should have been returned by SetState, or be an empty State.
+// There should be no concurrent calls to any of the exported functions of this package with
+// a call to SetState because it will modify the global state in a non-thread-safe way.
+func SetState(newState State) (oldState State) {
+	if newState.lookupCache == nil {
+		newState.lookupCache = new(par.Cache[lookupCacheKey, Repo])
+	}
+	if newState.downloadCache == nil {
+		newState.downloadCache = new(par.ErrCache[module.Version, string])
+	}
+
+	goSum.mu.Lock()
+	defer goSum.mu.Unlock()
+
+	oldState = State{
+		goSumFile:           GoSumFile,
+		workspaceGoSumFiles: WorkspaceGoSumFiles,
+		lookupCache:         lookupCache,
+		downloadCache:       downloadCache,
+		sumState:            goSum.sumState,
+	}
+
+	GoSumFile = newState.goSumFile
+	WorkspaceGoSumFiles = newState.workspaceGoSumFiles
 	// Uses of lookupCache and downloadCache both can call checkModSum,
 	// which in turn sets the used bit on goSum.status for modules.
-	// Reset them so used can be computed properly.
-	lookupCache = par.Cache[lookupCacheKey, Repo]{}
-	downloadCache = par.ErrCache[module.Version, string]{}
+	// Set (or reset) them so used can be computed properly.
+	lookupCache = newState.lookupCache
+	downloadCache = newState.downloadCache
+	// Set, or reset all fields on goSum. If being reset to empty, it will be initialized later.
+	goSum.sumState = newState.sumState
 
-	// Clear all fields on goSum. It will be initialized later
-	goSum.mu.Lock()
-	goSum.m = nil
-	goSum.w = nil
-	goSum.status = nil
-	goSum.overwrite = false
-	goSum.enabled = false
-	goSum.mu.Unlock()
+	return oldState
 }
 
 // initGoSum initializes the go.sum data.
@@ -481,11 +551,11 @@ func readGoSumFile(dst map[module.Version][]string, file string) (bool, error) {
 		data []byte
 		err  error
 	)
-	if actualSumFile, ok := fsys.OverlayPath(file); ok {
+	if fsys.Replaced(file) {
 		// Don't lock go.sum if it's part of the overlay.
 		// On Plan 9, locking requires chmod, and we don't want to modify any file
 		// in the overlay. See #44700.
-		data, err = os.ReadFile(actualSumFile)
+		data, err = os.ReadFile(fsys.Actual(file))
 	} else {
 		data, err = lockedfile.Read(file)
 	}
@@ -861,7 +931,7 @@ Outer:
 	if readonly {
 		return ErrGoSumDirty
 	}
-	if _, ok := fsys.OverlayPath(GoSumFile); ok {
+	if fsys.Replaced(GoSumFile) {
 		base.Fatalf("go: updates to go.sum needed, but go.sum is part of the overlay specified with -overlay")
 	}
 
@@ -915,7 +985,7 @@ func tidyGoSum(data []byte, keep map[module.Version]bool) []byte {
 		}
 	}
 
-	var mods []module.Version
+	mods := make([]module.Version, 0, len(goSum.m))
 	for m := range goSum.m {
 		mods = append(mods, m)
 	}
