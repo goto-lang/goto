@@ -1536,7 +1536,7 @@ func isfat(t *types.Type) bool {
 // inputs and outputs as the value of symbol <fn>.args_stackmap.
 // If fn has outputs, two bitmaps are written, otherwise just one.
 func WriteFuncMap(fn *ir.Func, abiInfo *abi.ABIParamResultInfo) {
-	if ir.FuncName(fn) == "_" || fn.Sym().Linkname != "" {
+	if ir.FuncName(fn) == "_" {
 		return
 	}
 	nptr := int(abiInfo.ArgWidth() / int64(types.PtrSize))
@@ -1551,6 +1551,7 @@ func WriteFuncMap(fn *ir.Func, abiInfo *abi.ABIParamResultInfo) {
 		nbitmap = 2
 	}
 	lsym := base.Ctxt.Lookup(fn.LSym.Name + ".args_stackmap")
+	lsym.Set(obj.AttrLinkname, true) // allow args_stackmap referenced from assembly
 	off := objw.Uint32(lsym, 0, uint32(nbitmap))
 	off = objw.Uint32(lsym, off, uint32(bv.N))
 	off = objw.BitVec(lsym, off, bv)

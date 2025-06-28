@@ -298,6 +298,9 @@ func TestPackagesAndErrors(ctx context.Context, done func(), opts PackageOpts, p
 	// Also the linker introduces implicit dependencies reported by LinkerDeps.
 	stk.Push("testmain")
 	deps := TestMainDeps // cap==len, so safe for append
+	if cover != nil && cfg.Experiment.CoverageRedesign {
+		deps = append(deps, "internal/coverage/cfile")
+	}
 	ldDeps, err := LinkerDeps(p)
 	if err != nil && pmain.Error == nil {
 		pmain.Error = &PackageError{Err: err}
@@ -680,6 +683,22 @@ func (t *testFuncs) Covered() string {
 	return " in " + strings.Join(t.Cover.Paths, ", ")
 }
 
+func (t *testFuncs) CoverSelectedPackages() string {
+	if t.Cover == nil || t.Cover.Paths == nil {
+		return `[]string{"` + t.Package.ImportPath + `"}`
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[]string{")
+	for k, p := range t.Cover.Pkgs {
+		if k != 0 {
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(&sb, `"%s"`, p.ImportPath)
+	}
+	sb.WriteString("}")
+	return sb.String()
+}
+
 // Tested returns the name of the package being tested.
 func (t *testFuncs) Tested() string {
 	return t.Package.Name
@@ -902,14 +921,14 @@ package main
 
 import (
 	"os"
-{{if .Cover}}
-	_ "unsafe"
-{{end}}
 {{if .TestMain}}
 	"reflect"
 {{end}}
 	"testing"
 	"testing/internal/testdeps"
+{{if .Cover}}
+	"internal/coverage/cfile"
+{{end}}
 
 {{if .ImportTest}}
 	{{if .NeedTest}}_test{{else}}_{{end}} {{.Package.ImportPath | printf "%q"}}
@@ -944,45 +963,19 @@ var examples = []testing.InternalExample{
 }
 
 func init() {
+{{if .Cover}}
+	testdeps.CoverMode = {{printf "%q" .Cover.Mode}}
+	testdeps.Covered = {{printf "%q" .Covered}}
+	testdeps.CoverSelectedPackages = {{printf "%s" .CoverSelectedPackages}}
+	testdeps.CoverSnapshotFunc = cfile.Snapshot
+	testdeps.CoverProcessTestDirFunc = cfile.ProcessCoverTestDir
+	testdeps.CoverMarkProfileEmittedFunc = cfile.MarkProfileEmitted
+
+{{end}}
 	testdeps.ImportPath = {{.ImportPath | printf "%q"}}
 }
 
-{{if .Cover}}
-
-//go:linkname runtime_coverage_processCoverTestDir runtime/coverage.processCoverTestDir
-func runtime_coverage_processCoverTestDir(dir string, cfile string, cmode string, cpkgs string) error
-
-//go:linkname testing_registerCover2 testing.registerCover2
-func testing_registerCover2(mode string, tearDown func(coverprofile string, gocoverdir string) (string, error), snapcov func() float64)
-
-//go:linkname runtime_coverage_markProfileEmitted runtime/coverage.markProfileEmitted
-func runtime_coverage_markProfileEmitted(val bool)
-
-//go:linkname runtime_coverage_snapshot runtime/coverage.snapshot
-func runtime_coverage_snapshot() float64
-
-func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
-	var err error
-	if gocoverdir == "" {
-		gocoverdir, err = os.MkdirTemp("", "gocoverdir")
-		if err != nil {
-			return "error setting GOCOVERDIR: bad os.MkdirTemp return", err
-		}
-		defer os.RemoveAll(gocoverdir)
-	}
-	runtime_coverage_markProfileEmitted(true)
-	cmode := {{printf "%q" .Cover.Mode}}
-	if err := runtime_coverage_processCoverTestDir(gocoverdir, coverprofile, cmode, {{printf "%q" .Covered}}); err != nil {
-		return "error generating coverage report", err
-	}
-	return "", nil
-}
-{{end}}
-
 func main() {
-{{if .Cover}}
-	testing_registerCover2({{printf "%q" .Cover.Mode}}, coverTearDown, runtime_coverage_snapshot)
-{{end}}
 	m := testing.MainStart(testdeps.TestDeps{}, tests, benchmarks, fuzzTargets, examples)
 {{with .TestMain}}
 	{{.Package}}.{{.Name}}(m)

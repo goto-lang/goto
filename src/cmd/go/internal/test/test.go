@@ -837,7 +837,7 @@ func runTest(ctx context.Context, cmd *base.Command, args []string) {
 	// Read testcache expiration time, if present.
 	// (We implement go clean -testcache by writing an expiration date
 	// instead of searching out and deleting test result cache entries.)
-	if dir := cache.DefaultDir(); dir != "off" {
+	if dir, _ := cache.DefaultDir(); dir != "off" {
 		if data, _ := lockedfile.Read(filepath.Join(dir, "testexpire.txt")); len(data) > 0 && data[len(data)-1] == '\n' {
 			if t, err := strconv.ParseInt(string(data[:len(data)-1]), 10, 64); err == nil {
 				testCacheExpire = time.Unix(0, t)
@@ -1067,7 +1067,7 @@ func builderTest(b *work.Builder, ctx context.Context, pkgOpts load.PackageOpts,
 			Package:    p,
 			IgnoreFail: true, // run (prepare output) even if build failed
 		}
-		if writeCoverMetaAct != nil {
+		if writeCoverMetaAct != nil && build.Actor != nil {
 			// There is no real "run" for this package (since there
 			// are no tests), but if coverage is turned on, we can
 			// collect coverage data for the code in the package by

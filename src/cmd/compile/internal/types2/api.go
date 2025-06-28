@@ -176,9 +176,13 @@ type Config struct {
 	// exactly one "%s" format, e.g. "[go.dev/e/%s]".
 	ErrorURL string
 
-	// If EnableAlias is set, alias declarations produce an Alias type.
-	// Otherwise the alias information is only in the type name, which
-	// points directly to the actual (aliased) type.
+	// If EnableAlias is set, alias declarations produce an Alias type. Otherwise
+	// the alias information is only in the type name, which points directly to
+	// the actual (aliased) type.
+	//
+	// This setting must not differ among concurrent type-checking operations,
+	// since it affects the behavior of Universe.Lookup("any").
+	//
 	// This flag will eventually be removed (with Go 1.24 at the earliest).
 	EnableAlias bool
 }
@@ -317,7 +321,7 @@ func (info *Info) recordTypes() bool {
 }
 
 // TypeOf returns the type of expression e, or nil if not found.
-// Precondition 1: the Types map is populated or StoreTypesInSynax is set.
+// Precondition 1: the Types map is populated or StoreTypesInSyntax is set.
 // Precondition 2: Uses and Defs maps are populated.
 func (info *Info) TypeOf(e syntax.Expr) Type {
 	if info.Types != nil {

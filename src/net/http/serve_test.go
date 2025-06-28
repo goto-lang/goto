@@ -613,6 +613,22 @@ func TestMuxNoSlashRedirectWithTrailingSlash(t *testing.T) {
 	}
 }
 
+// Test that we don't attempt trailing-slash response 405 on a path that already has
+// a trailing slash.
+// See issue #67657.
+func TestMuxNoSlash405WithTrailingSlash(t *testing.T) {
+	mux := NewServeMux()
+	mux.HandleFunc("GET /{x}/", func(w ResponseWriter, r *Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	w := httptest.NewRecorder()
+	req, _ := NewRequest("GET", "/", nil)
+	mux.ServeHTTP(w, req)
+	if g, w := w.Code, 404; g != w {
+		t.Errorf("got %d, want %d", g, w)
+	}
+}
+
 func TestShouldRedirectConcurrency(t *testing.T) { run(t, testShouldRedirectConcurrency) }
 func testShouldRedirectConcurrency(t *testing.T, mode testMode) {
 	mux := NewServeMux()
@@ -1744,6 +1760,24 @@ func TestAutomaticHTTP2_ListenAndServe_GetCertificate(t *testing.T) {
 	testAutomaticHTTP2_ListenAndServe(t, &tls.Config{
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return &cert, nil
+		},
+	})
+}
+
+func TestAutomaticHTTP2_ListenAndServe_GetConfigForClient(t *testing.T) {
+	cert, err := tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &tls.Config{
+		// GetConfigForClient requires specifying a full tls.Config so we must set
+		// NextProtos ourselves.
+		NextProtos:   []string{"h2"},
+		Certificates: []tls.Certificate{cert},
+	}
+	testAutomaticHTTP2_ListenAndServe(t, &tls.Config{
+		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
+			return conf, nil
 		},
 	})
 }
@@ -4743,11 +4777,11 @@ Host: foo
 func TestHandlerFinishSkipBigContentLengthRead(t *testing.T) {
 	setParallel(t)
 	conn := newTestConn()
-	conn.readBuf.Write([]byte(fmt.Sprintf(
+	conn.readBuf.WriteString(
 		"POST / HTTP/1.1\r\n" +
 			"Host: test\r\n" +
 			"Content-Length: 9999999999\r\n" +
-			"\r\n" + strings.Repeat("a", 1<<20))))
+			"\r\n" + strings.Repeat("a", 1<<20))
 
 	ls := &oneConnListener{conn}
 	var inHandlerLen int
@@ -7143,4 +7177,110 @@ func testErrorContentLength(t *testing.T, mode testMode) {
 	if string(body) != errorBody+"\n" {
 		t.Fatalf("read body: %q, want %q", string(body), errorBody)
 	}
+}
+
+func TestError(t *testing.T) {
+	w := httptest.NewRecorder()
+	w.Header().Set("Content-Length", "1")
+	w.Header().Set("X-Content-Type-Options", "scratch and sniff")
+	w.Header().Set("Other", "foo")
+	Error(w, "oops", 432)
+
+	h := w.Header()
+	for _, hdr := range []string{"Content-Length"} {
+		if v, ok := h[hdr]; ok {
+			t.Errorf("%s: %q, want not present", hdr, v)
+		}
+	}
+	if v := h.Get("Content-Type"); v != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type: %q, want %q", v, "text/plain; charset=utf-8")
+	}
+	if v := h.Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Errorf("X-Content-Type-Options: %q, want %q", v, "nosniff")
+	}
+}
+
+func TestServerReadAfterWriteHeader100Continue(t *testing.T) {
+	run(t, testServerReadAfterWriteHeader100Continue)
+}
+func testServerReadAfterWriteHeader100Continue(t *testing.T, mode testMode) {
+	t.Skip("https://go.dev/issue/67555")
+	body := []byte("body")
+	cst := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+		w.WriteHeader(200)
+		NewResponseController(w).Flush()
+		io.ReadAll(r.Body)
+		w.Write(body)
+	}), func(tr *Transport) {
+		tr.ExpectContinueTimeout = 24 * time.Hour // forever
+	})
+
+	req, _ := NewRequest("GET", cst.ts.URL, strings.NewReader("body"))
+	req.Header.Set("Expect", "100-continue")
+	res, err := cst.c.Do(req)
+	if err != nil {
+		t.Fatalf("Get(%q) = %v", cst.ts.URL, err)
+	}
+	defer res.Body.Close()
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("io.ReadAll(res.Body) = %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("response body = %q, want %q", got, body)
+	}
+}
+
+func TestServerReadAfterHandlerDone100Continue(t *testing.T) {
+	run(t, testServerReadAfterHandlerDone100Continue)
+}
+func testServerReadAfterHandlerDone100Continue(t *testing.T, mode testMode) {
+	t.Skip("https://go.dev/issue/67555")
+	readyc := make(chan struct{})
+	cst := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+		go func() {
+			<-readyc
+			io.ReadAll(r.Body)
+			<-readyc
+		}()
+	}), func(tr *Transport) {
+		tr.ExpectContinueTimeout = 24 * time.Hour // forever
+	})
+
+	req, _ := NewRequest("GET", cst.ts.URL, strings.NewReader("body"))
+	req.Header.Set("Expect", "100-continue")
+	res, err := cst.c.Do(req)
+	if err != nil {
+		t.Fatalf("Get(%q) = %v", cst.ts.URL, err)
+	}
+	res.Body.Close()
+	readyc <- struct{}{} // server starts reading from the request body
+	readyc <- struct{}{} // server finishes reading from the request body
+}
+
+func TestServerReadAfterHandlerAbort100Continue(t *testing.T) {
+	run(t, testServerReadAfterHandlerAbort100Continue)
+}
+func testServerReadAfterHandlerAbort100Continue(t *testing.T, mode testMode) {
+	t.Skip("https://go.dev/issue/67555")
+	readyc := make(chan struct{})
+	cst := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+		go func() {
+			<-readyc
+			io.ReadAll(r.Body)
+			<-readyc
+		}()
+		panic(ErrAbortHandler)
+	}), func(tr *Transport) {
+		tr.ExpectContinueTimeout = 24 * time.Hour // forever
+	})
+
+	req, _ := NewRequest("GET", cst.ts.URL, strings.NewReader("body"))
+	req.Header.Set("Expect", "100-continue")
+	res, err := cst.c.Do(req)
+	if err == nil {
+		res.Body.Close()
+	}
+	readyc <- struct{}{} // server starts reading from the request body
+	readyc <- struct{}{} // server finishes reading from the request body
 }
