@@ -144,7 +144,9 @@ func (check *Checker) unary(x *operand, e *syntax.Operation) {
 			return
 		}
 		x.mode = value
-		x.typ = &Pointer{base: x.typ, nonNil: true}
+		// goto: while we know this is non-nil, we cannot change this as this would alter type inference
+		// for existing go programs. Instead, we add a flag in goto files during parsing.
+		x.typ = &Pointer{base: x.typ, nonNil: e.NonNil}
 		return
 
 	case syntax.Recv:
@@ -273,7 +275,7 @@ func (check *Checker) updateExprType(x syntax.Expr, typ Type, final bool) {
 		*syntax.SliceExpr,
 		*syntax.AssertExpr,
 		*syntax.ListExpr,
-		//*syntax.StarExpr,
+	//*syntax.StarExpr,
 		*syntax.KeyValueExpr,
 		*syntax.ArrayType,
 		*syntax.StructType,

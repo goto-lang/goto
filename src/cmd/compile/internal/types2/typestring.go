@@ -182,7 +182,11 @@ func (w *typeWriter) typ(typ Type) {
 		w.byte('}')
 
 	case *Pointer:
-		w.byte('*')
+		if t.nonNil {
+			w.byte('^')
+		} else {
+			w.byte('*')
+		}
 		w.typ(t.base)
 
 	case *Tuple:

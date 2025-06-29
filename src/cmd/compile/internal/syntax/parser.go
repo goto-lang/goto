@@ -1098,6 +1098,9 @@ func (p *parser) unaryExpr() Expr {
 			x := new(Operation)
 			x.pos = p.pos()
 			x.Op = And
+			if p.isGoto() {
+				x.NonNil = true
+			}
 			p.next()
 			// unaryExpr may have returned a parenthesized composite literal
 			// (see comment in operand) - remove parentheses if any

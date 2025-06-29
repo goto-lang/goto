@@ -209,8 +209,11 @@ func hasNil(t Type) bool {
 	switch u := under(t).(type) {
 	case *Basic:
 		return u.kind == UnsafePointer
-	case *Slice, *Pointer, *Signature, *Map, *Chan:
+	case *Slice, *Signature, *Map, *Chan:
 		return true
+	case *Pointer:
+		// A pointer type is nil if it is not a non-nil pointer type.
+		return !u.nonNil
 	case *Interface:
 		return !isTypeParam(t) || underIs(t, func(u Type) bool {
 			return u != nil && hasNil(u)
@@ -304,8 +307,9 @@ func (c *comparer) identical(x, y Type, p *ifacePair) bool {
 
 	case *Pointer:
 		// Two pointer types are identical if they have identical base types.
+		// goto: and identical nillability
 		if y, ok := y.(*Pointer); ok {
-			return c.identical(x.base, y.base, p)
+			return x.nonNil == y.nonNil && c.identical(x.base, y.base, p)
 		}
 
 	case *Tuple:

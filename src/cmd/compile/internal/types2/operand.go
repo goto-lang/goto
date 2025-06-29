@@ -353,6 +353,22 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, Cod
 		return true, 0
 	}
 
+	// goto:
+	// T is a nillable pointer type and V is a non-nillable pointer
+	if vup, ok := Vu.(*Pointer); ok {
+		if _, ok := Tu.(*Pointer); ok {
+			// TODO goto: check if we need to deal with type parameters in a special way here
+
+			// if Identical(vup.base, tup.base) {
+			// non-nil pointer V is assignable to nil pointer T
+			if vup.nonNil {
+				return true, 0
+			}
+
+			// }
+		}
+	}
+
 	// T is an interface type, but not a type parameter, and V implements T.
 	// Also handle the case where T is a pointer to an interface so that we get
 	// the Checker.implements error cause.
