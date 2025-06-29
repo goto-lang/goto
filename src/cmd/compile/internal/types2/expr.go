@@ -144,7 +144,7 @@ func (check *Checker) unary(x *operand, e *syntax.Operation) {
 			return
 		}
 		x.mode = value
-		x.typ = &Pointer{base: x.typ}
+		x.typ = &Pointer{base: x.typ, nonNil: true}
 		return
 
 	case syntax.Recv:
@@ -1165,7 +1165,7 @@ func (check *Checker) exprInternal(T *target, x *operand, e syntax.Expr, hint Ty
 					goto Error
 				case typexpr:
 					check.validVarType(e.X, x.typ)
-					x.typ = &Pointer{base: x.typ}
+					x.typ = &Pointer{base: x.typ, nonNil: e.NonNil}
 				default:
 					var base Type
 					if !underIs(x.typ, func(u Type) bool {

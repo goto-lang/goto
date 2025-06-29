@@ -620,8 +620,11 @@ func (u *unifier) nify(x, y Type, mode unifyMode, p *ifacePair) (result bool) {
 
 	case *Pointer:
 		// Two pointer types unify if their base types unify.
+		// goto: ...and if their nillability is the same
 		if y, ok := y.(*Pointer); ok {
+			// if mode == assign && (!x.nonNil || x.nonNil == y.nonNil) || mode == exact {
 			return u.nify(x.base, y.base, emode, p)
+			// }
 		}
 
 	case *Tuple:

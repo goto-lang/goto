@@ -9,7 +9,7 @@ package types
 
 // A Pointer represents a pointer type.
 type Pointer struct {
-	base Type // element type
+	base   Type // element type
 }
 
 // NewPointer returns a new pointer type for the given element (base) type.

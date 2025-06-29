@@ -6,7 +6,8 @@ package types2
 
 // A Pointer represents a pointer type.
 type Pointer struct {
-	base Type // element type
+	base   Type // element type
+	nonNil bool // goto flag for nillable pointer *p (default in go) or non-nillable ^p
 }
 
 // NewPointer returns a new pointer type for the given element (base) type.
