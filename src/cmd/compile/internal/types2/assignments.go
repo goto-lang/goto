@@ -159,6 +159,13 @@ func (check *Checker) initVar(lhs *Var, x *operand, context string) {
 		return
 	}
 
+	// If we have a pointer with an unknown base, this is a 'goto'-cast from nillable to non-nil pointer
+	nonNil := false
+	if p, ok := lhs.typ.(*Pointer); ok && p.base == nil {
+		nonNil = p.nonNil
+		lhs.typ = nil
+	}
+
 	// If lhs doesn't have a type yet, use the type of x.
 	if lhs.typ == nil {
 		typ := x.typ
@@ -173,6 +180,9 @@ func (check *Checker) initVar(lhs *Var, x *operand, context string) {
 			typ = Default(typ)
 		}
 		lhs.typ = typ
+		if p, ok := typ.(*Pointer); ok {
+			p.nonNil = nonNil
+		}
 	}
 
 	check.assignment(x, lhs.typ, context)
@@ -567,6 +577,9 @@ func (check *Checker) shortVarDecl(pos poser, lhs, rhs []syntax.Expr) {
 
 		// declare new variable
 		obj := newVar(LocalVar, ident.Pos(), check.pkg, name, nil)
+		if ident.NonNil {
+			obj.typ = &Pointer{nonNil: true}
+		}
 		lhsVars[i] = obj
 		if name != "_" {
 			newVars = append(newVars, obj)

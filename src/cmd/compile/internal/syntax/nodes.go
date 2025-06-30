@@ -230,10 +230,9 @@ type (
 	}
 
 	Operation struct {
-		Op	Operator
-		X, Y	Expr	// Y == nil means unary expression
-		NonNil	bool	// Only valid for Goto's non-nil pointer
-		expr	
+		Op   Operator
+		X, Y Expr // Y == nil means unary expression
+		expr
 	}
 
 	// Fun(ArgList[0], ArgList[1], ...)
@@ -315,7 +314,8 @@ type (
 
 type expr struct {
 	node
-	typeAndValue // After typechecking, contains the results of typechecking this expression.
+	typeAndValue      // After typechecking, contains the results of typechecking this expression.
+	NonNil       bool // Only valid for Goto's non-nil pointer
 }
 
 func (*expr) aExpr() {}

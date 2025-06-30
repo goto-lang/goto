@@ -2723,6 +2723,30 @@ func (p *parser) ifStmt() *IfStmt {
 	s.Init, s.Cond, _ = p.header(_If)
 	s.Then = p.blockStmt("if clause")
 
+	if p.isGoto() {
+		// upgrade the type of an inner variable to non-nillable if the condition checks for non-nil
+		if s.Init != nil {
+			if as, ok := s.Init.(*AssignStmt); ok && as.Op == Def {
+				// if the init statement is a short variable declaration, we can upgrade the type
+				if lhs, ok := as.Lhs.(*Name); ok {
+					// only upgrade the type if the condition checks for non-nil
+					if cond, ok := s.Cond.(*Operation); ok && cond.Op == Neq {
+						// condition must be lhs != nil
+						// TODO goto: also allow nil != lhs
+						if rhs, ok := cond.Y.(*Name); ok && rhs.Value == "nil" {
+							// only upgrade if the condition checks for the declared variable
+							if condLhs, ok := cond.X.(*Name); ok && condLhs.Value == lhs.Value {
+								// TODO goto: this will likely not work. instead we have to figure out
+								// 	where the declared variable type information lives
+								lhs.NonNil = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if p.got(_Else) {
 		switch p.tok {
 		case _If:

@@ -491,6 +491,25 @@ func (check *Checker) implicitTypeAndValue(x *operand, target Type) (Type, const
 	return target, nil, 0
 }
 
+// reports whether this is a comparison that is part of a conditional pointer upgrade from nillable to non-nillable
+func isPointerUpgrade(x, y *operand, op syntax.Operator) bool {
+	if op != syntax.Neq {
+		return false
+	}
+
+	if _, ok := x.typ.(*Pointer); ok && y.isNil() {
+		y.typ = x.typ
+		return true
+	}
+
+	if _, ok := y.typ.(*Pointer); ok && x.isNil() {
+		x.typ = y.typ
+		return true
+	}
+
+	return false
+}
+
 // If switchCase is true, the operator op is ignored.
 func (check *Checker) comparison(x, y *operand, op syntax.Operator, switchCase bool) {
 	// Avoid spurious errors if any of the operands has an invalid type (go.dev/issue/54405).
@@ -513,13 +532,17 @@ func (check *Checker) comparison(x, y *operand, op syntax.Operator, switchCase b
 	if !ok {
 		ok, _ = y.assignableTo(check, x.typ, nil)
 	}
+	pointerUpgrade := false
 	if !ok {
-		// Report the error on the 2nd operand since we only
-		// know after seeing the 2nd operand whether we have
-		// a type mismatch.
-		errOp = y
-		cause = check.sprintf("mismatched types %s and %s", x.typ, y.typ)
-		goto Error
+		pointerUpgrade = isPointerUpgrade(x, y, op)
+		if !pointerUpgrade {
+			// Report the error on the 2nd operand since we only
+			// know after seeing the 2nd operand whether we have
+			// a type mismatch.
+			errOp = y
+			cause = check.sprintf("mismatched types %s and %s", x.typ, y.typ)
+			goto Error
+		}
 	}
 
 	// check if comparison is defined for operands
@@ -528,6 +551,7 @@ func (check *Checker) comparison(x, y *operand, op syntax.Operator, switchCase b
 	case syntax.Eql, syntax.Neq:
 		// spec: "The equality operators == and != apply to operands that are comparable."
 		switch {
+		case pointerUpgrade: // do nothing
 		case x.isNil() || y.isNil():
 			// Comparison against nil requires that the other operand type has nil.
 			typ := x.typ
